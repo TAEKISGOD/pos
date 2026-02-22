@@ -335,7 +335,7 @@ export function AnalyticsDashboard() {
   }, [activePeriod, selectedDate, dateRange]);
 
   // ── render helpers ──
-  const NoData = ({ colSpan: _colSpan }: { colSpan?: number }) => (
+  const NoData = () => (
     <div className="py-12 text-center text-sm text-muted-foreground">
       {loading ? "불러오는 중..." : "해당 기간에 데이터가 없습니다."}
     </div>
