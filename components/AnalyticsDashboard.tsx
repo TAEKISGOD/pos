@@ -105,13 +105,40 @@ export function AnalyticsDashboard() {
     if (!storeId) return;
     setLoading(true);
 
-    // menus
+    // menus (recipe menus)
     const { data: menus } = await supabase
       .from("menus")
       .select("id, name")
       .eq("store_id", storeId);
 
-    if (!menus || menus.length === 0) {
+    const menuIds = menus?.map((m) => m.id) || [];
+    const menuNameMap: Record<string, string> = {};
+    menus?.forEach((m) => {
+      menuNameMap[m.id] = m.name;
+    });
+
+    // menu board items
+    const { data: sectionRows } = await supabase
+      .from("menu_board_sections")
+      .select("id, name")
+      .eq("store_id", storeId);
+
+    const sectionIds = sectionRows?.map((s) => s.id) || [];
+    let boardItems: { id: string; name: string }[] = [];
+    if (sectionIds.length > 0) {
+      const { data: itemRows } = await supabase
+        .from("menu_board_items")
+        .select("id, name")
+        .in("section_id", sectionIds);
+      boardItems = itemRows || [];
+    }
+    boardItems.forEach((item) => {
+      menuNameMap[item.id] = item.name;
+    });
+
+    const allMenuIds = [...menuIds, ...boardItems.map((b) => b.id)];
+
+    if (allMenuIds.length === 0) {
       setMenuSales([]);
       setDailySales([]);
       setMenuCosts([]);
@@ -119,17 +146,11 @@ export function AnalyticsDashboard() {
       return;
     }
 
-    const menuIds = menus.map((m) => m.id);
-    const menuNameMap: Record<string, string> = {};
-    menus.forEach((m) => {
-      menuNameMap[m.id] = m.name;
-    });
-
     // daily_sales
     const { data: salesData } = await supabase
       .from("daily_sales")
       .select("*")
-      .in("menu_id", menuIds)
+      .in("menu_id", allMenuIds)
       .gte("date", startStr)
       .lte("date", endStr);
 
@@ -279,7 +300,7 @@ export function AnalyticsDashboard() {
     0
   );
 
-  const maxBarValue = Math.max(...dailySales.map((d) => d.totalQty), 1);
+  const maxBarValue = Math.max(...menuSales.map((m) => m.totalQty), 1);
   const maxWaste = Math.max(...wasteItems.map((w) => w.totalWaste), 1);
   const maxCost = Math.max(...menuCosts.map((c) => c.costPerServing), 1);
 
@@ -430,47 +451,49 @@ export function AnalyticsDashboard() {
           </h3>
         </div>
         <div className="px-[22px] pb-[22px] pt-[18px]">
-          {dailySales.length === 0 || totalSales === 0 ? (
+          {menuSales.length === 0 ? (
             <NoData />
           ) : (
-            <>
-              <div className="flex items-end gap-2 h-[200px] border-b">
-                {dailySales.map((d, i) => (
+            <div className="overflow-x-auto">
+              <div className="flex items-end gap-2 h-[200px] border-b" style={{ minWidth: menuSales.length > 8 ? `${menuSales.length * 72}px` : undefined }}>
+                {menuSales.map((m, i) => (
                   <div
                     key={i}
                     className="flex-1 flex flex-col items-center h-full justify-end gap-1"
+                    style={{ minWidth: "56px" }}
                   >
-                    {d.totalQty > 0 && (
+                    {m.totalQty > 0 && (
                       <span className="text-[11px] text-muted-foreground font-medium">
-                        {d.totalQty}
+                        {m.totalQty}
                       </span>
                     )}
                     <div
                       className={cn(
                         "w-full max-w-[48px] rounded-t transition-opacity hover:opacity-75 cursor-pointer",
-                        d.totalQty > 0 ? "bg-zinc-800" : "bg-zinc-200"
+                        m.totalQty > 0 ? "bg-zinc-800" : "bg-zinc-200"
                       )}
                       style={{
                         height: `${Math.max(
-                          (d.totalQty / maxBarValue) * 100,
-                          d.totalQty > 0 ? 4 : 1
+                          (m.totalQty / maxBarValue) * 100,
+                          m.totalQty > 0 ? 4 : 1
                         )}%`,
                       }}
                     />
                   </div>
                 ))}
               </div>
-              <div className="flex gap-2 pt-2">
-                {dailySales.map((d, i) => (
+              <div className="flex gap-2 pt-2" style={{ minWidth: menuSales.length > 8 ? `${menuSales.length * 72}px` : undefined }}>
+                {menuSales.map((m, i) => (
                   <div
                     key={i}
                     className="flex-1 text-center text-[11px] text-muted-foreground truncate"
+                    style={{ minWidth: "56px" }}
                   >
-                    {d.label}
+                    {m.menuName}
                   </div>
                 ))}
               </div>
-            </>
+            </div>
           )}
         </div>
       </div>
