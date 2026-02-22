@@ -24,7 +24,7 @@ interface Props {
   storeId: string;
 }
 
-export function WasteInput({ activeCategory, storeId }: Props) {
+export function WasteInput({ storeId }: Props) {
   const { selectedDate } = useDateContext();
   const [products, setProducts] = useState<Product[]>([]);
   const [waste, setWaste] = useState<Record<string, number>>({});

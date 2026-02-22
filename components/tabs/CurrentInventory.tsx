@@ -28,7 +28,7 @@ interface Props {
   storeId: string;
 }
 
-export function CurrentInventory({ activeCategory, storeId }: Props) {
+export function CurrentInventory({ activeCategory }: Props) {
   const { selectedDate } = useDateContext();
   const [rows, setRows] = useState<Row[]>([]);
   const [isSauceCategory, setIsSauceCategory] = useState(false);

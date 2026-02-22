@@ -45,7 +45,7 @@ interface Props {
   storeId: string;
 }
 
-export function TodaySales({ activeCategory, storeId }: Props) {
+export function TodaySales({ storeId }: Props) {
   const { selectedDate } = useDateContext();
   const [recipeMenus, setRecipeMenus] = useState<RecipeMenu[]>([]);
   const [recipeSales, setRecipeSales] = useState<Record<string, number>>({});
