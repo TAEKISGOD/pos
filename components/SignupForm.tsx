@@ -34,16 +34,27 @@ export function SignupForm() {
     }
 
     if (authData.user) {
-      const { error: storeError } = await supabase.from("stores").insert({
-        user_id: authData.user.id,
-        name: storeName,
-      });
+      const { data: storeData, error: storeError } = await supabase
+        .from("stores")
+        .insert({ user_id: authData.user.id, name: storeName })
+        .select("id")
+        .single();
 
-      if (storeError) {
+      if (storeError || !storeData) {
         setError("가게 정보 생성에 실패했습니다.");
         setLoading(false);
         return;
       }
+
+      // 기본 카테고리 생성
+      const defaultCategories = ["소스류", "야채류", "고기류", "주류", "음료", "자체소스"];
+      await supabase.from("categories").insert(
+        defaultCategories.map((name, i) => ({
+          store_id: storeData.id,
+          name,
+          sort_order: i,
+        }))
+      );
     }
 
     router.push("/dashboard");

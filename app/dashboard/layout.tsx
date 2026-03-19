@@ -12,6 +12,7 @@ import { ko } from "date-fns/locale";
 import Link from "next/link";
 import { CalendarIcon, LogOut, Store } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ChatBox } from "@/components/ChatBox";
 
 export default function DashboardLayout({
   children,
@@ -20,14 +21,18 @@ export default function DashboardLayout({
 }) {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [storeName, setStoreName] = useState("");
+  const [storeId, setStoreId] = useState("");
+  const [userId, setUserId] = useState("");
   const router = useRouter();
   const pathname = usePathname();
   const supabase = createClient();
 
   const navLinks = [
     { href: "/dashboard", label: "재고 관리" },
+    { href: "/dashboard/ordering", label: "발주 관리" },
     { href: "/dashboard/analytics", label: "대시보드" },
     { href: "/dashboard/menuboard", label: "메뉴판" },
+    { href: "/dashboard/shop", label: "OnIS Shop" },
   ];
 
   useEffect(() => {
@@ -39,10 +44,14 @@ export default function DashboardLayout({
       }
       const { data: store } = await supabase
         .from("stores")
-        .select("name")
+        .select("id, name")
         .eq("user_id", user.id)
         .single();
-      if (store) setStoreName(store.name);
+      if (user) setUserId(user.id);
+      if (store) {
+        setStoreName(store.name);
+        setStoreId(store.id);
+      }
     };
     fetchStore();
   }, []);
@@ -125,6 +134,8 @@ export default function DashboardLayout({
         <main className="p-6">
           {children}
         </main>
+
+        {storeId && userId && <ChatBox storeId={storeId} userId={userId} />}
       </div>
     </DateContext.Provider>
   );

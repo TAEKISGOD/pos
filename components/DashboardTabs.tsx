@@ -13,7 +13,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Plus } from "lucide-react";
+import { Plus, HelpCircle } from "lucide-react";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { CurrentInventory } from "@/components/tabs/CurrentInventory";
 import { CustomSauce } from "@/components/tabs/CustomSauce";
@@ -26,6 +27,7 @@ export interface Category {
   id: string;
   name: string;
   store_id: string;
+  sort_order: number;
 }
 
 export function DashboardTabs() {
@@ -54,6 +56,7 @@ export function DashboardTabs() {
       .from("categories")
       .select("*")
       .eq("store_id", store.id)
+      .order("sort_order")
       .order("created_at");
 
     if (data && data.length > 0) {
@@ -69,9 +72,13 @@ export function DashboardTabs() {
   const addCategory = async () => {
     if (!newCategoryName.trim() || !storeId) return;
 
+    const maxOrder = categories.length > 0
+      ? Math.max(...categories.map((c) => c.sort_order ?? 0)) + 1
+      : 0;
     const { error } = await supabase.from("categories").insert({
       store_id: storeId,
       name: newCategoryName.trim(),
+      sort_order: maxOrder,
     });
 
     if (!error) {
@@ -97,10 +104,58 @@ export function DashboardTabs() {
   };
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; catId: string } | null>(null);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+
+  const categoryTooltips: Record<string, string> = {
+    "소스류": "시제품 소스 재고를 입력해주세요",
+    "야채류": "야채 재고를 입력해주세요",
+    "고기류": "육류 재고를 입력해주세요",
+    "주류": "소주 및 맥주 재고를 입력해주세요",
+    "음료": "음료 재고를 입력해주세요",
+    "자체소스": "배합 소스 및 특제 소스 재고를 입력해주세요",
+  };
 
   const handleContextMenu = (e: React.MouseEvent, catId: string) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, catId });
+  };
+
+  const handleDragStart = (idx: number) => {
+    setDragIdx(idx);
+  };
+
+  const handleDragOver = (e: React.DragEvent, idx: number) => {
+    e.preventDefault();
+    setDragOverIdx(idx);
+  };
+
+  const handleDrop = async (targetIdx: number) => {
+    if (dragIdx === null || dragIdx === targetIdx) {
+      setDragIdx(null);
+      setDragOverIdx(null);
+      return;
+    }
+
+    const reordered = [...categories];
+    const [moved] = reordered.splice(dragIdx, 1);
+    reordered.splice(targetIdx, 0, moved);
+
+    // 즉시 UI 반영
+    setCategories(reordered);
+    setDragIdx(null);
+    setDragOverIdx(null);
+
+    // DB 업데이트
+    const updates = reordered.map((cat, i) =>
+      supabase.from("categories").update({ sort_order: i }).eq("id", cat.id)
+    );
+    await Promise.all(updates);
+  };
+
+  const handleDragEnd = () => {
+    setDragIdx(null);
+    setDragOverIdx(null);
   };
 
   return (
@@ -122,23 +177,48 @@ export function DashboardTabs() {
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap">
-        {categories.map((cat) => (
-          <Button
-            key={cat.id}
-            variant={activeCategory === cat.id ? "default" : "outline"}
-            size="sm"
-            onClick={() => setActiveCategory(cat.id)}
-            onContextMenu={(e) => handleContextMenu(e, cat.id)}
-          >
-            {cat.name}
-          </Button>
-        ))}
-        <Dialog open={categoryDialogOpen} onOpenChange={setCategoryDialogOpen}>
-          <DialogTrigger asChild>
-            <Button variant="outline" size="sm">
-              <Plus className="h-4 w-4" />
+        {categories.map((cat, idx) => {
+          const tip = categoryTooltips[cat.name];
+          const btn = (
+            <Button
+              variant={activeCategory === cat.id ? "default" : "outline"}
+              size="sm"
+              draggable
+              onClick={() => setActiveCategory(cat.id)}
+              onContextMenu={(e) => handleContextMenu(e, cat.id)}
+              onDragStart={() => handleDragStart(idx)}
+              onDragOver={(e) => handleDragOver(e, idx)}
+              onDrop={() => handleDrop(idx)}
+              onDragEnd={handleDragEnd}
+              className={`cursor-grab active:cursor-grabbing transition-all ${
+                dragOverIdx === idx && dragIdx !== idx
+                  ? "ring-2 ring-primary ring-offset-1"
+                  : ""
+              } ${dragIdx === idx ? "opacity-50" : ""}`}
+            >
+              {cat.name}
             </Button>
-          </DialogTrigger>
+          );
+          return tip ? (
+            <Tooltip key={cat.id}>
+              <TooltipTrigger asChild>{btn}</TooltipTrigger>
+              <TooltipContent>{tip}</TooltipContent>
+            </Tooltip>
+          ) : (
+            <span key={cat.id}>{btn}</span>
+          );
+        })}
+        <Dialog open={categoryDialogOpen} onOpenChange={setCategoryDialogOpen}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm">
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </DialogTrigger>
+            </TooltipTrigger>
+            <TooltipContent>서브탭을 추가합니다</TooltipContent>
+          </Tooltip>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>카테고리 추가</DialogTitle>
@@ -156,17 +236,40 @@ export function DashboardTabs() {
             </div>
           </DialogContent>
         </Dialog>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" />
+          </TooltipTrigger>
+          <TooltipContent side="right">
+            <p>드래그로 순서 변경</p>
+            <p>우클릭으로 삭제</p>
+            <p>+ 버튼으로 추가</p>
+          </TooltipContent>
+        </Tooltip>
       </div>
 
       {/* 메인 탭 */}
       <Tabs defaultValue="inventory" className="w-full">
         <TabsList className="grid w-full grid-cols-6">
-          <TabsTrigger value="inventory">현재재고</TabsTrigger>
-          <TabsTrigger value="custom-sauce">자체소스</TabsTrigger>
-          <TabsTrigger value="menu-recipe">메뉴별 레시피</TabsTrigger>
-          <TabsTrigger value="sales">오늘 판매량</TabsTrigger>
-          <TabsTrigger value="waste">폐기 수량</TabsTrigger>
-          <TabsTrigger value="update">업데이트 재고</TabsTrigger>
+          {[
+            { value: "inventory", label: "현재재고", tip: "서브탭별 재고 정보를 입력해주세요" },
+            { value: "custom-sauce", label: "자체소스", tip: "자체소스 레시피를 입력해주세요" },
+            { value: "menu-recipe", label: "메뉴별 레시피", tip: "매장에 등록된 메뉴의 레시피를 입력해주세요" },
+            { value: "sales", label: "오늘 판매량", tip: "마감 후 매출 내역 엑셀 파일을 업로드해주세요" },
+            { value: "waste", label: "폐기 수량", tip: "당일 폐기 수량을 입력해주세요" },
+            { value: "update", label: "업데이트 재고", tip: "업데이트된 재고를 확인해주세요" },
+          ].map((tab) => (
+            <Tooltip key={tab.value}>
+              <TabsTrigger value={tab.value} asChild>
+                <TooltipTrigger asChild>
+                  <button className="inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow">
+                    {tab.label}
+                  </button>
+                </TooltipTrigger>
+              </TabsTrigger>
+              <TooltipContent>{tab.tip}</TooltipContent>
+            </Tooltip>
+          ))}
         </TabsList>
 
         <TabsContent value="inventory">

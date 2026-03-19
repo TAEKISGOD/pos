@@ -34,3 +34,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# claude
+.claude/
+
+# misc files
+nul
+*.ipynb
+*.pdf
+setup-db.mjs
+supabase-schema.sql
+information.md

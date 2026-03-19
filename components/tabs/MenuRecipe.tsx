@@ -8,8 +8,10 @@ import { Button } from "@/components/ui/button";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Plus, Save, Trash2 } from "lucide-react";
+import { Plus, Save, Trash2, Table2, Loader2, CheckCircle2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useSpreadsheetNav, parsePasteData } from "@/hooks/use-spreadsheet";
+import { SpreadsheetModal, type SheetColumn, type SheetRow } from "@/components/SpreadsheetModal";
 
 interface Product {
   id: string;
@@ -19,6 +21,7 @@ interface Product {
 interface Menu {
   id: string;
   name: string;
+  product_code?: string;
   isNew?: boolean;
 }
 
@@ -30,10 +33,12 @@ interface Props {
 export function MenuRecipe({ activeCategory, storeId }: Props) {
   const [products, setProducts] = useState<Product[]>([]);
   const [menus, setMenus] = useState<Menu[]>([]);
-  // recipes[productId][menuId] = { amount, tolerance_percent }
   const [recipes, setRecipes] = useState<Record<string, Record<string, { amount: number; tolerance_percent: number }>>>({});
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "done">("idle");
   const supabase = createClient();
   const { toast } = useToast();
+  const navRef = useSpreadsheetNav();
 
   const fetchData = useCallback(async () => {
     if (!activeCategory || !storeId) return;
@@ -77,13 +82,23 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  useEffect(() => {
+    const handler = () => { fetchData(); };
+    window.addEventListener("onis-data-updated", handler);
+    return () => window.removeEventListener("onis-data-updated", handler);
+  }, [fetchData]);
+
   const addMenu = () => {
     const tempId = `new-${Date.now()}`;
-    setMenus((prev) => [...prev, { id: tempId, name: "", isNew: true }]);
+    setMenus((prev) => [...prev, { id: tempId, name: "", product_code: "", isNew: true }]);
   };
 
   const updateMenuName = (menuId: string, name: string) => {
     setMenus((prev) => prev.map((m) => m.id === menuId ? { ...m, name } : m));
+  };
+
+  const updateMenuCode = (menuId: string, product_code: string) => {
+    setMenus((prev) => prev.map((m) => m.id === menuId ? { ...m, product_code } : m));
   };
 
   const deleteMenu = async (menuId: string) => {
@@ -96,7 +111,6 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
     }
 
     setMenus((prev) => prev.filter((m) => m.id !== menuId));
-    // Clean up recipes for this menu
     setRecipes((prev) => {
       const updated = { ...prev };
       Object.keys(updated).forEach((productId) => {
@@ -126,15 +140,16 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
   };
 
   const saveAll = async () => {
-    // 1. Save new menus first
+    setSaveStatus("saving");
+    try {
     const newMenus = menus.filter((m) => m.isNew);
-    const savedMenuIds: Record<string, string> = {}; // tempId -> realId
+    const savedMenuIds: Record<string, string> = {};
 
     for (const menu of newMenus) {
       if (!menu.name.trim()) continue;
       const { data, error } = await supabase
         .from("menus")
-        .insert({ store_id: storeId, name: menu.name.trim() })
+        .insert({ store_id: storeId, name: menu.name.trim(), product_code: menu.product_code?.trim() || null })
         .select("id")
         .single();
 
@@ -145,12 +160,19 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
       savedMenuIds[menu.id] = data.id;
     }
 
-    // 2. Build final menu ID list (replace temp IDs with real IDs)
+    // 기존 메뉴 이름/코드 업데이트
+    const existingMenus = menus.filter((m) => !m.isNew && m.name.trim());
+    for (const menu of existingMenus) {
+      await supabase
+        .from("menus")
+        .update({ name: menu.name.trim(), product_code: menu.product_code?.trim() || null })
+        .eq("id", menu.id);
+    }
+
     const finalMenuIds = menus
       .filter((m) => m.name.trim())
       .map((m) => savedMenuIds[m.id] || m.id);
 
-    // 3. Delete existing recipes for these menus + products
     if (finalMenuIds.length > 0) {
       await supabase
         .from("menu_recipes")
@@ -159,7 +181,6 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
         .in("product_id", products.map((p) => p.id));
     }
 
-    // 4. Insert recipes
     const inserts: { menu_id: string; product_id: string; amount: number; tolerance_percent: number }[] = [];
     Object.entries(recipes).forEach(([productId, menuMap]) => {
       Object.entries(menuMap).forEach(([menuId, { amount, tolerance_percent }]) => {
@@ -175,11 +196,184 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
       if (error) { toast({ title: "레시피 저장 실패", variant: "destructive" }); return; }
     }
 
-    toast({ title: "메뉴별 레시피 저장 완료" });
     fetchData();
+    setSaveStatus("done");
+    setTimeout(() => setSaveStatus("idle"), 1500);
+    } catch {
+      setSaveStatus("idle");
+      toast({ title: "저장 실패", variant: "destructive" });
+    }
+  };
+
+  // Paste handler
+  const handlePaste = (e: React.ClipboardEvent, productIdx: number, menuIdx: number, field: "amount" | "tolerance_percent") => {
+    const data = parsePasteData(e);
+    if (!data) return;
+    for (let r = 0; r < data.length; r++) {
+      const pIdx = productIdx + r;
+      if (pIdx >= products.length) break;
+      for (let c = 0; c < data[r].length; c++) {
+        const mIdx = menuIdx + Math.floor(c / 2);
+        if (mIdx >= menus.length) break;
+        const f = c % 2 === 0 ? "amount" : "tolerance_percent";
+        if (field === "tolerance_percent" && c === 0) {
+          updateRecipe(products[pIdx].id, menus[mIdx].id, "tolerance_percent", data[r][c]);
+        } else {
+          updateRecipe(products[pIdx].id, menus[mIdx].id, f, data[r][c]);
+        }
+      }
+    }
+  };
+
+  // Sheet data
+  const EXTRA_MENU_SLOTS = 100;
+  const allMenuSlots = [
+    ...menus.map((m) => ({ id: m.id, name: m.name, product_code: m.product_code || "", isNew: false })),
+    ...Array.from({ length: EXTRA_MENU_SLOTS }, (_, i) => ({ id: `__newmenu_${i}`, name: "", product_code: "", isNew: true })),
+  ];
+
+  // 컬럼: 헤더 없이 (공백), 전부 editable
+  const sheetColumns: SheetColumn[] = [
+    { key: "c0", header: " ", width: 150, type: "text", editable: true },
+    ...allMenuSlots.flatMap((_, i) => [
+      { key: `c${1 + i * 2}`, header: " ", type: "text" as const, editable: true, width: 100 },
+      { key: `c${2 + i * 2}`, header: " ", type: "text" as const, editable: true, width: 100 },
+    ]),
+  ];
+
+  // 1행: 메뉴명 / 상품코드 (병합 없음)
+  // 2행: 사용량 / 오차(%)
+
+  // 데이터 행: 1행=메뉴명+상품코드, 2행=사용량/오차 라벨, 3행~=제품 데이터
+  const sheetRows: SheetRow[] = [
+    // 1행: 메뉴명 / 상품코드
+    {
+      id: "__header_menu",
+      values: {
+        c0: "제품명",
+        ...Object.fromEntries(
+          allMenuSlots.flatMap((slot, i) => [
+            [`c${1 + i * 2}`, slot.name || ""],
+            [`c${2 + i * 2}`, slot.product_code || ""],
+          ])
+        ),
+      },
+    },
+    // 2행: 사용량/오차 라벨
+    {
+      id: "__header_sub",
+      values: {
+        c0: "",
+        ...Object.fromEntries(
+          allMenuSlots.flatMap((_, i) => [
+            [`c${1 + i * 2}`, "사용량"],
+            [`c${2 + i * 2}`, "오차(%)"],
+          ])
+        ),
+      },
+    },
+    // 3행~: 제품 데이터
+    ...products.map((product) => {
+      const values: Record<string, string | number> = { c0: product.name };
+      allMenuSlots.forEach((slot, i) => {
+        if (!slot.isNew) {
+          const recipe = recipes[product.id]?.[slot.id];
+          values[`c${1 + i * 2}`] = recipe?.amount !== undefined && recipe?.amount !== null ? recipe.amount : "";
+          values[`c${2 + i * 2}`] = recipe?.tolerance_percent !== undefined && recipe?.tolerance_percent !== null ? recipe.tolerance_percent : "";
+        } else {
+          values[`c${1 + i * 2}`] = "";
+          values[`c${2 + i * 2}`] = "";
+        }
+      });
+      return { id: product.id, values };
+    }),
+  ];
+
+  const handleSheetCellChange = (rowId: string, colKey: string, value: string | number) => {
+    const colIdx = Number(colKey.replace("c", ""));
+    if (isNaN(colIdx)) return;
+
+    // 1행: 메뉴 이름 (왼쪽) / 상품코드 (오른쪽) 편집
+    if (rowId === "__header_menu") {
+      if (colIdx === 0) return; // "제품명" 라벨 무시
+      const slotIdx = Math.floor((colIdx - 1) / 2);
+      const isLeftCol = (colIdx - 1) % 2 === 0; // 왼쪽=메뉴명, 오른쪽=상품코드
+      const slot = allMenuSlots[slotIdx];
+      if (!slot) return;
+
+      if (isLeftCol) {
+        // 메뉴명 편집
+        const menuName = String(value || "").trim();
+        if (slot.isNew) {
+          if (menuName) {
+            const existingNew = menus.find((m) => m.id === slot.id);
+            if (!existingNew) {
+              setMenus((prev) => [...prev, { id: slot.id, name: menuName, product_code: "", isNew: true }]);
+            } else {
+              updateMenuName(slot.id, menuName);
+            }
+          }
+        } else {
+          updateMenuName(slot.id, menuName);
+        }
+      } else {
+        // 상품코드 편집
+        const code = String(value || "").trim();
+        if (slot.isNew) {
+          const existingNew = menus.find((m) => m.id === slot.id);
+          if (existingNew) {
+            updateMenuCode(slot.id, code);
+          }
+        } else {
+          updateMenuCode(slot.id, code);
+        }
+      }
+      return;
+    }
+
+    // 2행: 사용량/오차 라벨 → 무시
+    if (rowId === "__header_sub") return;
+
+    // 제품명 컬럼은 무시
+    if (colIdx === 0) return;
+
+    // 제품 데이터 행
+    const slotIdx = Math.floor((colIdx - 1) / 2);
+    const isAmount = (colIdx - 1) % 2 === 0;
+    const slot = allMenuSlots[slotIdx];
+    if (!slot) return;
+
+    if (slot.isNew) {
+      const existingNew = menus.find((m) => m.id === slot.id);
+      if (!existingNew) {
+        const menuName = `새 메뉴 ${slotIdx - menus.length + 1}`;
+        setMenus((prev) => [...prev, { id: slot.id, name: menuName, isNew: true }]);
+      }
+    }
+
+    const field = isAmount ? "amount" : "tolerance_percent";
+    updateRecipe(rowId, slot.id, field, Number(value) || 0);
   };
 
   return (
+    <>
+    {saveStatus !== "idle" && (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40">
+        <div className="bg-background rounded-xl px-8 py-6 shadow-2xl flex flex-col items-center gap-3">
+          {saveStatus === "saving" ? (
+            <>
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <span className="text-sm font-medium">저장중...</span>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="h-8 w-8 text-green-500" />
+              <span className="text-sm font-medium">저장 완료</span>
+            </>
+          )}
+        </div>
+      </div>
+    )}
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
@@ -188,6 +382,9 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
             <Button variant="outline" size="sm" onClick={addMenu}>
               <Plus className="h-4 w-4 mr-1" />메뉴 추가
             </Button>
+            <Button variant="outline" size="sm" onClick={() => setSheetOpen(true)}>
+              <Table2 className="h-4 w-4 mr-1" />시트 입력
+            </Button>
             <Button size="sm" onClick={saveAll}>
               <Save className="h-4 w-4 mr-1" />저장
             </Button>
@@ -195,25 +392,31 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
         </div>
       </CardHeader>
       <CardContent>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" ref={navRef}>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="min-w-[120px]" rowSpan={2}>제품명</TableHead>
+                <TableHead className="min-w-[120px] sticky left-0 z-10 bg-background" rowSpan={2}>제품명</TableHead>
                 {menus.map((menu) => (
-                  <TableHead key={menu.id} className="min-w-[180px] text-center">
-                    <div className="flex items-center justify-center gap-1">
+                  <TableHead key={menu.id} className="min-w-[220px] text-center">
+                    <div className="flex items-center gap-1">
                       {menu.isNew ? (
                         <Input
-                          className="h-7 text-sm"
+                          className="h-7 text-sm flex-1"
                           value={menu.name}
                           onChange={(e) => updateMenuName(menu.id, e.target.value)}
                           placeholder="메뉴명"
                           lang="ko"
                         />
                       ) : (
-                        <span className="text-sm">{menu.name}</span>
+                        <span className="text-sm flex-1 truncate">{menu.name}</span>
                       )}
+                      <Input
+                        className="h-7 text-xs text-center w-[72px] shrink-0 text-muted-foreground"
+                        value={menu.product_code || ""}
+                        onChange={(e) => updateMenuCode(menu.id, e.target.value)}
+                        placeholder="코드"
+                      />
                       <Button
                         variant="ghost"
                         size="icon"
@@ -238,10 +441,10 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {products.map((product) => (
+              {products.map((product, pIdx) => (
                 <TableRow key={product.id}>
-                  <TableCell className="font-medium">{product.name}</TableCell>
-                  {menus.map((menu) => (
+                  <TableCell className="font-medium sticky left-0 z-10 bg-background">{product.name}</TableCell>
+                  {menus.map((menu, mIdx) => (
                     <TableCell key={menu.id}>
                       <div className="flex items-center justify-center gap-2">
                         <Input
@@ -249,12 +452,14 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
                           className="w-[80px] h-7 text-sm text-center"
                           value={recipes[product.id]?.[menu.id]?.amount ?? 0}
                           onChange={(e) => updateRecipe(product.id, menu.id, "amount", Number(e.target.value))}
+                          onPaste={(e) => handlePaste(e, pIdx, mIdx, "amount")}
                         />
                         <Input
                           type="number"
                           className="w-[70px] h-7 text-sm text-center text-muted-foreground"
                           value={recipes[product.id]?.[menu.id]?.tolerance_percent ?? 0}
                           onChange={(e) => updateRecipe(product.id, menu.id, "tolerance_percent", Number(e.target.value))}
+                          onPaste={(e) => handlePaste(e, pIdx, mIdx, "tolerance_percent")}
                         />
                       </div>
                     </TableCell>
@@ -271,7 +476,20 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
             </TableBody>
           </Table>
         </div>
+
+        <SpreadsheetModal
+          open={sheetOpen}
+          onOpenChange={setSheetOpen}
+          title="메뉴별 레시피 시트"
+          columns={sheetColumns}
+          rows={sheetRows}
+          onCellChange={handleSheetCellChange}
+
+          freezeRows={2}
+          allowInsertRow={false}
+        />
       </CardContent>
     </Card>
+    </>
   );
 }

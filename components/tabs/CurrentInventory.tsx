@@ -9,9 +9,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Plus, Trash2, Save } from "lucide-react";
+import { Plus, Trash2, Save, Table2, Loader2, CheckCircle2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
+import { useSpreadsheetNav, parsePasteData } from "@/hooks/use-spreadsheet";
+import { SpreadsheetModal, type SheetColumn, type SheetRow } from "@/components/SpreadsheetModal";
 
 interface Row {
   id?: string;
@@ -33,14 +35,16 @@ export function CurrentInventory({ activeCategory }: Props) {
   const [rows, setRows] = useState<Row[]>([]);
   const [isSauceCategory, setIsSauceCategory] = useState(false);
   const [calculatedPrices, setCalculatedPrices] = useState<Record<string, number>>({});
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "done">("idle");
   const supabase = createClient();
   const { toast } = useToast();
   const dateStr = format(selectedDate, "yyyy-MM-dd");
+  const navRef = useSpreadsheetNav();
 
   const fetchRows = useCallback(async () => {
     if (!activeCategory) return;
 
-    // 카테고리 이름 확인 (자체소스 여부)
     const { data: categoryData } = await supabase
       .from("categories")
       .select("name")
@@ -82,7 +86,6 @@ export function CurrentInventory({ activeCategory }: Props) {
       remaining: snapMap[p.id]?.remaining ?? 0,
     })));
 
-    // 자체소스: 레시피 기반 가격 자동 계산
     if (isSauce && productIds.length > 0) {
       const { data: recipes } = await supabase
         .from("custom_sauce_recipes")
@@ -139,6 +142,12 @@ export function CurrentInventory({ activeCategory }: Props) {
     fetchRows();
   }, [fetchRows]);
 
+  useEffect(() => {
+    const handler = () => { fetchRows(); };
+    window.addEventListener("onis-data-updated", handler);
+    return () => window.removeEventListener("onis-data-updated", handler);
+  }, [fetchRows]);
+
   const addRow = () => {
     setRows((prev) => [...prev, { name: "", unit: "g", price: 0, quantity: 0, remaining: 0, isNew: true }]);
   };
@@ -162,96 +171,190 @@ export function CurrentInventory({ activeCategory }: Props) {
 
   const saveAll = async () => {
     if (!activeCategory) return;
+    setSaveStatus("saving");
 
-    for (const row of rows) {
-      if (!row.name.trim()) continue;
+    try {
+      for (const row of rows) {
+        if (!row.name.trim()) continue;
 
-      let productId = row.id;
+        let productId = row.id;
 
-      if (row.isNew) {
-        const { data: newProduct, error } = await supabase
-          .from("products")
-          .insert({ category_id: activeCategory, name: row.name.trim(), unit: row.unit, price: row.price })
-          .select()
-          .single();
+        if (row.isNew) {
+          const { data: newProduct, error } = await supabase
+            .from("products")
+            .insert({ category_id: activeCategory, name: row.name.trim(), unit: row.unit, price: row.price })
+            .select()
+            .single();
 
-        if (error || !newProduct) { toast({ title: `제품 "${row.name}" 추가 실패`, variant: "destructive" }); continue; }
-        productId = newProduct.id;
-      } else if (row.id) {
-        await supabase.from("products").update({ name: row.name.trim(), unit: row.unit, price: row.price }).eq("id", row.id);
+          if (error || !newProduct) { toast({ title: `제품 "${row.name}" 추가 실패`, variant: "destructive" }); continue; }
+          productId = newProduct.id;
+        } else if (row.id) {
+          await supabase.from("products").update({ name: row.name.trim(), unit: row.unit, price: row.price }).eq("id", row.id);
+        }
+
+        if (productId) {
+          await supabase.from("inventory_snapshots").delete().eq("product_id", productId).eq("date", dateStr);
+          const { error: snapError } = await supabase.from("inventory_snapshots").insert({
+            product_id: productId, date: dateStr, quantity: row.quantity, remaining: row.remaining,
+          });
+          if (snapError) { toast({ title: `재고 저장 실패: ${snapError.message}`, variant: "destructive" }); }
+        }
       }
 
-      if (productId) {
-        await supabase.from("inventory_snapshots").delete().eq("product_id", productId).eq("date", dateStr);
-        const { error: snapError } = await supabase.from("inventory_snapshots").insert({
-          product_id: productId, date: dateStr, quantity: row.quantity, remaining: row.remaining,
-        });
-        if (snapError) { toast({ title: `재고 저장 실패: ${snapError.message}`, variant: "destructive" }); }
+      setSaveStatus("done");
+      setTimeout(() => setSaveStatus("idle"), 1500);
+      fetchRows();
+    } catch {
+      setSaveStatus("idle");
+    }
+  };
+
+  // Paste handler for number inputs
+  const handlePaste = (e: React.ClipboardEvent, startIdx: number, field: "price" | "quantity" | "remaining") => {
+    const data = parsePasteData(e);
+    if (!data) return;
+    setRows((prev) => {
+      const updated = [...prev];
+      for (let i = 0; i < data.length && startIdx + i < updated.length; i++) {
+        updated[startIdx + i] = { ...updated[startIdx + i], [field]: data[i][0] ?? 0 };
       }
+      return updated;
+    });
+  };
+
+  // Sheet data
+  const sheetColumns: SheetColumn[] = [
+    { key: "name", header: "제품명", type: "text", editable: true, width: 200 },
+    { key: "unit", header: "용량(g)", type: "text", editable: true, width: 100 },
+    ...(isSauceCategory
+      ? [{ key: "price", header: "가격(원)", width: 120 } as SheetColumn]
+      : [{ key: "price", header: "가격(원)", type: "number" as const, editable: true, width: 120 } as SheetColumn]),
+    { key: "quantity", header: "수량", type: "number", editable: true, width: 100 },
+    { key: "remaining", header: "잔량", type: "number", editable: true, width: 100 },
+  ];
+
+  const sheetRows: SheetRow[] = rows.map((row, idx) => ({
+    id: row.id ?? `new-${idx}`,
+    values: {
+      name: row.name,
+      unit: row.unit,
+      price: isSauceCategory
+        ? (calculatedPrices[row.id ?? ""] != null ? `${calculatedPrices[row.id ?? ""].toLocaleString()}원` : "-")
+        : row.price,
+      quantity: row.quantity,
+      remaining: row.remaining,
+    },
+  }));
+
+  const handleSheetCellChange = (rowId: string, colKey: string, value: string | number) => {
+    // 새 행 (기존 데이터 범위 밖)
+    if (rowId.startsWith("__new__")) {
+      setRows((prev) => {
+        const newRow: Row = { name: "", unit: "g", price: 0, quantity: 0, remaining: 0, isNew: true };
+        if (colKey === "name" || colKey === "unit") {
+          newRow[colKey] = String(value);
+        } else if (colKey === "price" || colKey === "quantity" || colKey === "remaining") {
+          newRow[colKey] = Number(value) || 0;
+        }
+        return [...prev, newRow];
+      });
+      return;
     }
 
-    toast({ title: "저장 완료" });
-    fetchRows();
+    const idx = rows.findIndex((r) => (r.id ?? `new-${rows.indexOf(r)}`) === rowId);
+    if (idx === -1) return;
+    if (colKey === "name" || colKey === "unit") {
+      updateRow(idx, colKey, String(value));
+    } else if (colKey === "price" || colKey === "quantity" || colKey === "remaining") {
+      updateRow(idx, colKey, Number(value) || 0);
+    }
   };
 
   return (
+    <>
+    {saveStatus !== "idle" && (
+      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40">
+        <div className="bg-background rounded-xl px-8 py-6 shadow-2xl flex flex-col items-center gap-3">
+          {saveStatus === "saving" ? (
+            <>
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              <span className="text-sm font-medium">저장중...</span>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="h-8 w-8 text-green-500" />
+              <span className="text-sm font-medium">저장 완료</span>
+            </>
+          )}
+        </div>
+      </div>
+    )}
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle>현재재고 - {format(selectedDate, "yyyy년 MM월 dd일")}</CardTitle>
-          <Button size="sm" onClick={saveAll}>
-            <Save className="h-4 w-4 mr-1" />
-            저장
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setSheetOpen(true)}>
+              <Table2 className="h-4 w-4 mr-1" />시트 입력
+            </Button>
+            <Button size="sm" onClick={saveAll}>
+              <Save className="h-4 w-4 mr-1" />저장
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>제품명</TableHead>
-              <TableHead>용량(g)</TableHead>
-              <TableHead>가격(원)</TableHead>
-              <TableHead>수량</TableHead>
-              <TableHead>잔량</TableHead>
-              <TableHead className="w-[50px]"></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row, idx) => (
-              <TableRow key={row.id ?? `new-${idx}`}>
-                <TableCell>
-                  <Input lang="ko" value={row.name} onChange={(e) => updateRow(idx, "name", e.target.value)} placeholder="제품명" />
-                </TableCell>
-                <TableCell>
-                  <Input value={row.unit} onChange={(e) => updateRow(idx, "unit", e.target.value)} placeholder="g" className="w-[80px]" />
-                </TableCell>
-                <TableCell>
-                  {isSauceCategory ? (
-                    <span className="text-sm text-muted-foreground w-[100px] inline-block text-right">
-                      {calculatedPrices[row.id ?? ""] != null
-                        ? `${calculatedPrices[row.id ?? ""].toLocaleString()}원`
-                        : "-"}
-                    </span>
-                  ) : (
-                    <Input type="number" value={row.price || ""} onChange={(e) => updateRow(idx, "price", Number(e.target.value))} placeholder="0" className="w-[100px]" />
-                  )}
-                </TableCell>
-                <TableCell>
-                  <Input type="number" value={row.quantity} onChange={(e) => updateRow(idx, "quantity", Number(e.target.value))} className="w-[100px]" />
-                </TableCell>
-                <TableCell>
-                  <Input type="number" value={row.remaining} onChange={(e) => updateRow(idx, "remaining", Number(e.target.value))} className="w-[100px]" />
-                </TableCell>
-                <TableCell>
-                  <Button variant="ghost" size="icon" onClick={() => deleteRow(idx)}>
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  </Button>
-                </TableCell>
+        <div ref={navRef}>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>제품명</TableHead>
+                <TableHead>용량(g)</TableHead>
+                <TableHead>가격(원)</TableHead>
+                <TableHead>수량</TableHead>
+                <TableHead>잔량</TableHead>
+                <TableHead className="w-[50px]"></TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row, idx) => (
+                <TableRow key={row.id ?? `new-${idx}`}>
+                  <TableCell>
+                    <Input lang="ko" value={row.name} onChange={(e) => updateRow(idx, "name", e.target.value)} placeholder="제품명" />
+                  </TableCell>
+                  <TableCell>
+                    <Input value={row.unit} onChange={(e) => updateRow(idx, "unit", e.target.value)} placeholder="g" className="w-[80px]" />
+                  </TableCell>
+                  <TableCell>
+                    {isSauceCategory ? (
+                      <span className="text-sm text-muted-foreground w-[100px] inline-block text-right">
+                        {calculatedPrices[row.id ?? ""] != null
+                          ? `${calculatedPrices[row.id ?? ""].toLocaleString()}원`
+                          : "-"}
+                      </span>
+                    ) : (
+                      <Input type="number" value={row.price || ""} onChange={(e) => updateRow(idx, "price", Number(e.target.value))} placeholder="0" className="w-[100px]"
+                        onPaste={(e) => handlePaste(e, idx, "price")} />
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Input type="number" value={row.quantity} onChange={(e) => updateRow(idx, "quantity", Number(e.target.value))} className="w-[100px]"
+                      onPaste={(e) => handlePaste(e, idx, "quantity")} />
+                  </TableCell>
+                  <TableCell>
+                    <Input type="number" value={row.remaining} onChange={(e) => updateRow(idx, "remaining", Number(e.target.value))} className="w-[100px]"
+                      onPaste={(e) => handlePaste(e, idx, "remaining")} />
+                  </TableCell>
+                  <TableCell>
+                    <Button variant="ghost" size="icon" onClick={() => deleteRow(idx)}>
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
 
         {activeCategory && (
           <Button variant="outline" className="mt-4 w-full" onClick={addRow}>
@@ -259,7 +362,17 @@ export function CurrentInventory({ activeCategory }: Props) {
             제품 추가
           </Button>
         )}
+
+        <SpreadsheetModal
+          open={sheetOpen}
+          onOpenChange={setSheetOpen}
+          title={`현재재고 시트 - ${format(selectedDate, "yyyy년 MM월 dd일")}`}
+          columns={sheetColumns}
+          rows={sheetRows}
+          onCellChange={handleSheetCellChange}
+        />
       </CardContent>
     </Card>
+    </>
   );
 }
