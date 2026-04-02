@@ -227,15 +227,18 @@ ${storeDataText}
 여러 재료는 actions 배열에 여러 개를 넣으세요.
 처리 불가능한 경우 일반 텍스트로 설명하세요.`;
 
-const INVENTORY_SYSTEM_PROMPT = (storeDataText: string) => `당신은 한국 음식점의 현재재고를 수정하는 어시스턴트입니다.
+const INVENTORY_SYSTEM_PROMPT = (storeDataText: string, dateStr: string) => `당신은 한국 음식점의 현재재고를 수정하는 어시스턴트입니다.
 
 현재 매장 데이터:
 ${storeDataText}
 
-사용자가 제품의 재고 정보를 수정 요청하면, DB 변경 액션을 생성하세요.
-지원하는 수정 항목: 제품명(name), 단위(unit), 가격(price)
+현재 선택된 날짜: ${dateStr}
 
-반드시 아래 JSON 형식으로만 응답하세요:
+사용자가 제품의 정보를 수정 요청하면, DB 변경 액션을 생성하세요.
+
+**지원하는 작업 2가지:**
+
+1. 제품 정보 수정 (products 테이블):
 {
   "description": "변경 내용 설명 (한국어)",
   "actions": [
@@ -245,14 +248,29 @@ ${storeDataText}
     }
   ]
 }
-
 field 가능한 값: "name", "unit", "price"
+
+2. 재고 수량/잔량 수정 (inventory_snapshots 테이블):
+{
+  "description": "변경 내용 설명 (한국어)",
+  "actions": [
+    {
+      "type": "update_inventory",
+      "params": { "productName": "제품명", "quantity": 5, "remaining": 200 }
+    }
+  ]
+}
+- quantity(수량)와 remaining(잔량) 중 사용자가 언급한 것만 포함하세요.
+- 둘 다 언급하면 둘 다 포함하세요.
+- 날짜는 현재 선택된 날짜(${dateStr})를 기준으로 합니다.
+
 여러 수정은 actions 배열에 여러 개를 넣으세요.
+두 타입을 섞어서 사용할 수도 있습니다.
 제품을 찾을 수 없으면 일반 텍스트로 안내하세요.`;
 
 export async function POST(request: Request) {
   try {
-    const { message, storeId, userId, mode = "chat", history = [] } = await request.json();
+    const { message, storeId, userId, mode = "chat", history = [], date } = await request.json();
 
     if (!message || typeof message !== "string") {
       return Response.json({ error: "메시지를 입력해주세요." }, { status: 400 });
@@ -339,10 +357,11 @@ export async function POST(request: Request) {
 
     // ─── 현재재고 수정 모드 ───
     if (mode === "inventory") {
+      const dateStr = date || new Date().toISOString().slice(0, 10);
       const response = await openai.chat.completions.create({
         model: "gpt-4o",
         messages: [
-          { role: "system", content: INVENTORY_SYSTEM_PROMPT(storeDataText) },
+          { role: "system", content: INVENTORY_SYSTEM_PROMPT(storeDataText, dateStr) },
           ...chatHistory,
         ],
         max_tokens: 1000,

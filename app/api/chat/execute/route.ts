@@ -1,7 +1,7 @@
 import { createServerSupabaseClient } from "@/lib/supabase-server";
 
 interface Action {
-  type: "update_menu_recipe" | "update_menu_code" | "update_sauce_recipe" | "update_product";
+  type: "update_menu_recipe" | "update_menu_code" | "update_sauce_recipe" | "update_product" | "update_inventory";
   params: Record<string, string | number>;
 }
 
@@ -228,6 +228,72 @@ export async function POST(request: Request) {
       return Response.json({
         success: true,
         message: `${productName}의 ${fieldLabels[String(field)] || field}을(를) ${value}(으)로 변경했습니다.`,
+      });
+    }
+
+    if (action.type === "update_inventory") {
+      const { productName, quantity, remaining, date } = action.params;
+      const dateStr = date ? String(date) : new Date().toISOString().slice(0, 10);
+
+      // 제품 찾기
+      const { data: categories } = await supabase
+        .from("categories")
+        .select("id")
+        .eq("store_id", storeId);
+
+      const catIds = (categories || []).map((c) => c.id);
+      const { data: products } = await supabase
+        .from("products")
+        .select("id, name")
+        .in("category_id", catIds);
+
+      const product = (products || []).find((p) => p.name === productName);
+      if (!product) {
+        return Response.json({ error: `제품 "${productName}"을 찾을 수 없습니다.` }, { status: 404 });
+      }
+
+      // 해당 날짜의 스냅샷 찾기
+      const { data: snapshot } = await supabase
+        .from("inventory_snapshots")
+        .select("id, quantity, remaining")
+        .eq("product_id", product.id)
+        .eq("date", dateStr)
+        .single();
+
+      if (snapshot) {
+        const updateData: Record<string, number> = {};
+        if (quantity !== undefined) updateData.quantity = Number(quantity);
+        if (remaining !== undefined) updateData.remaining = Number(remaining);
+
+        const { error } = await supabase
+          .from("inventory_snapshots")
+          .update(updateData)
+          .eq("id", snapshot.id);
+
+        if (error) {
+          return Response.json({ error: "업데이트 실패: " + error.message }, { status: 500 });
+        }
+      } else {
+        // 스냅샷이 없으면 새로 생성
+        const { error } = await supabase.from("inventory_snapshots").insert({
+          product_id: product.id,
+          date: dateStr,
+          quantity: quantity !== undefined ? Number(quantity) : 0,
+          remaining: remaining !== undefined ? Number(remaining) : 0,
+        });
+
+        if (error) {
+          return Response.json({ error: "생성 실패: " + error.message }, { status: 500 });
+        }
+      }
+
+      const changes: string[] = [];
+      if (quantity !== undefined) changes.push(`수량 ${quantity}`);
+      if (remaining !== undefined) changes.push(`잔량 ${remaining}`);
+
+      return Response.json({
+        success: true,
+        message: `${productName}의 ${changes.join(", ")}(으)로 변경했습니다. (${dateStr})`,
       });
     }
 

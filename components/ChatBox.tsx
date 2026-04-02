@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { MessageCircle, X, Send, Loader2, ChevronDown, Check, XCircle } from "lucide-react";
+import { useDateContext } from "@/lib/date-context";
+import { FuzzyMatchReview, FuzzyResult, ResolvedItem, FuzzyContext, FuzzyMode } from "@/components/FuzzyMatchReview";
 
 type ChatMode = "chat" | "recipe" | "sauce" | "inventory";
 
@@ -19,6 +21,11 @@ interface Message {
   content: string;
   action?: Action | null;
   actionStatus?: "pending" | "confirmed" | "rejected";
+  fuzzyResults?: FuzzyResult[] | null;
+  fuzzyCategories?: { id: string; name: string }[] | null;
+  fuzzyContext?: FuzzyContext | null;
+  fuzzyMode?: FuzzyMode;
+  fuzzyStatus?: "pending" | "confirmed" | "rejected";
 }
 
 interface ChatBoxProps {
@@ -68,7 +75,24 @@ const WELCOME_MESSAGE: Message = {
 일반 채팅에서는 매장 데이터 조회나 질문이 가능합니다.`,
 };
 
+// 구조화된 입력 감지: 숫자가 포함된 줄이 2개 이상 or "메뉴명: 재료" 형태
+function isStructuredInput(text: string, chatMode: ChatMode): boolean {
+  if (chatMode === "inventory") {
+    const lines = text.split("\n").filter((l) => l.trim());
+    if (lines.length < 2) return false;
+    const pattern = /^.+\s+\d+$/;
+    const matchCount = lines.filter((l) => pattern.test(l.trim())).length;
+    return matchCount >= 2;
+  }
+  if (chatMode === "recipe" || chatMode === "sauce") {
+    // 숫자가 포함되어 있으면 재료/레시피 입력으로 간주
+    return /\d+/.test(text) && text.length > 5;
+  }
+  return false;
+}
+
 export function ChatBox({ storeId, userId }: ChatBoxProps) {
+  const { selectedDate } = useDateContext();
   const [isOpen, setIsOpen] = useState(false);
   const [mode, setMode] = useState<ChatMode>("chat");
   const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
@@ -98,15 +122,15 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
       addSystemMessage("일반 채팅 모드로 전환되었습니다. 무엇이든 물어보세요!");
     } else if (newMode === "recipe") {
       addSystemMessage(
-        "📝 레시피 입력 모드\n\n메뉴명과 재료를 입력하면 메뉴별 레시피 탭에 반영됩니다.\n\n예: \"김치찌개: 김치 150g, 돼지고기 100g, 두부 반모, 대파 30g\"\n\n일반 채팅으로 돌아가려면 #/ 를 입력하세요."
+        "📝 레시피 입력 모드\n\n메뉴명과 재료를 입력하면 자동 매칭 후 반영됩니다.\n\n예: \"김치찌개: 김치 150, 돼지고기 100, 두부 50\"\n\n재료가 DB에 없거나 비슷한 제품이 여러 개면 후보를 보여드립니다.\n\nCtrl+Enter로 전송 / #/ 로 돌아가기"
       );
     } else if (newMode === "sauce") {
       addSystemMessage(
-        "🧪 자체소스 레시피 입력 모드\n\n소스명과 재료를 입력하면 자체소스 레시피 탭에 반영됩니다.\n\n예: \"양념소스: 간장 500, 설탕 200, 고춧가루 100\"\n\n일반 채팅으로 돌아가려면 #/ 를 입력하세요."
+        "🧪 자체소스 레시피 입력 모드\n\n소스명과 재료를 입력하면 자동 매칭 후 반영됩니다.\n\n예: \"양념소스: 간장 500, 설탕 200, 고춧가루 100\"\n\n재료가 DB에 없거나 비슷한 제품이 여러 개면 후보를 보여드립니다.\n\nCtrl+Enter로 전송 / #/ 로 돌아가기"
       );
     } else if (newMode === "inventory") {
       addSystemMessage(
-        "📦 현재재고 수정 모드\n\n제품명과 변경할 값을 입력하면 현재재고 탭에 반영됩니다.\n\n예: \"김치 수량 5, 잔량 200\"\n예: \"대파 가격 3000으로 변경\"\n\n일반 채팅으로 돌아가려면 #/ 를 입력하세요."
+        "📦 현재재고 수정 모드\n\n여러 줄로 재고를 한번에 입력할 수 있습니다:\n전복소스 480\n참기름 2780\n우스타 230\n\n자동으로 제품 매칭 → 후보 선택 → 확인 후 반영\n\n한 줄 입력도 가능합니다:\n• \"대파 가격 3000으로 변경\"\n\nCtrl+Enter로 전송 / #/ 로 돌아가기"
       );
     }
   };
@@ -137,8 +161,51 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
       return;
     }
 
-    if (trimmed.length > 500) {
-      setMessages((prev) => [...prev, { role: "assistant", content: "메시지는 500자 이내로 입력해주세요." }]);
+    // 구조화된 입력 → fuzzy-match API (inventory, recipe, sauce)
+    if ((mode === "inventory" || mode === "recipe" || mode === "sauce") && isStructuredInput(trimmed, mode)) {
+      const userMsg: Message = { role: "user", content: trimmed };
+      setMessages((prev) => [...prev, userMsg]);
+      setInput("");
+      setLoading(true);
+
+      try {
+        const res = await fetch("/api/chat/fuzzy-match", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: trimmed, storeId, userId, mode }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          setMessages((prev) => [...prev, { role: "assistant", content: data.error || "오류가 발생했습니다." }]);
+          return;
+        }
+
+        const modeLabel = mode === "recipe" ? "레시피" : mode === "sauce" ? "소스 레시피" : "재고";
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `${data.results.length}개 ${modeLabel} 항목을 파싱했습니다. 매칭 결과를 확인해주세요.`,
+            fuzzyResults: data.results,
+            fuzzyCategories: data.categories,
+            fuzzyContext: data.context || null,
+            fuzzyMode: data.mode || mode,
+            fuzzyStatus: "pending",
+          },
+        ]);
+      } catch {
+        setMessages((prev) => [...prev, { role: "assistant", content: "네트워크 오류가 발생했습니다." }]);
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // 일반 글자 수 제한
+    if (trimmed.length > 2000) {
+      setMessages((prev) => [...prev, { role: "assistant", content: "메시지는 2000자 이내로 입력해주세요." }]);
       return;
     }
 
@@ -148,7 +215,6 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
     setLoading(true);
 
     try {
-      // 대화 히스토리 구성 (system 메시지 제외, 최근 10개까지)
       const history = [...messages, userMsg]
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role, content: m.content }))
@@ -157,7 +223,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, storeId, userId, mode, history }),
+        body: JSON.stringify({ message: trimmed, storeId, userId, mode, history, date: selectedDate.toISOString().slice(0, 10) }),
       });
 
       const data = await res.json();
@@ -178,16 +244,218 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
           },
         ]);
       } else {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: data.reply },
-        ]);
+        setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
       }
     } catch {
       setMessages((prev) => [...prev, { role: "assistant", content: "네트워크 오류가 발생했습니다." }]);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleFuzzyConfirm = async (msgIndex: number, items: ResolvedItem[], fuzzyContext?: FuzzyContext) => {
+    const msg = messages[msgIndex];
+    const fuzzyMode = msg.fuzzyMode || "inventory";
+
+    setLoading(true);
+    setSaving(true);
+
+    try {
+      if (fuzzyMode === "inventory") {
+        // 벌크 재고 업데이트
+        const dateStr = selectedDate.toISOString().slice(0, 10);
+        const res = await fetch("/api/chat/bulk-inventory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            storeId,
+            date: dateStr,
+            items: items.map((item) => ({
+              productId: item.productId,
+              inputName: item.inputName,
+              value: item.value,
+              isNew: item.isNew,
+              newProductName: item.productName,
+              newProductUnit: item.newUnit,
+              newProductCategoryId: item.newCategoryId,
+            })),
+          }),
+        });
+
+        const data = await res.json();
+        setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, fuzzyStatus: "confirmed" as const } : m));
+
+        if (data.success) {
+          const successCount = data.results.filter((r: { success: boolean }) => r.success).length;
+          const failCount = data.results.length - successCount;
+          let resultMsg = `✅ ${successCount}개 항목 저장 완료`;
+          if (failCount > 0) {
+            const failedNames = data.results
+              .filter((r: { success: boolean }) => !r.success)
+              .map((r: { name: string; message: string }) => `${r.name}: ${r.message}`)
+              .join("\n");
+            resultMsg += `\n⚠️ ${failCount}개 실패:\n${failedNames}`;
+          }
+          setMessages((prev) => [...prev, { role: "assistant", content: resultMsg }]);
+          window.dispatchEvent(new Event("onis-data-updated"));
+        } else {
+          setMessages((prev) => [...prev, { role: "assistant", content: data.error || "저장 실패" }]);
+        }
+      } else if (fuzzyMode === "recipe") {
+        // 레시피: execute route로 하나씩 전송
+        const menuName = fuzzyContext?.menuName || msg.fuzzyContext?.menuName || "";
+        const results: string[] = [];
+        let allSuccess = true;
+
+        // 먼저 새 제품 생성
+        for (const item of items) {
+          if (item.isNew) {
+            const res = await fetch("/api/chat/bulk-inventory", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                storeId,
+                date: selectedDate.toISOString().slice(0, 10),
+                items: [{
+                  inputName: item.inputName,
+                  value: 0,
+                  isNew: true,
+                  newProductName: item.productName,
+                  newProductUnit: item.newUnit,
+                  newProductCategoryId: item.newCategoryId,
+                }],
+              }),
+            });
+            const data = await res.json();
+            if (data.results?.[0]?.success) {
+              // 새로 생성된 product_id 가져오기 위해 productName으로 매칭
+              // bulk-inventory가 productId를 직접 반환하지 않으므로 이름으로 execute
+            }
+          }
+        }
+
+        for (const item of items) {
+          const action = {
+            type: "update_menu_recipe",
+            params: {
+              menuName,
+              productName: item.productName,
+              amount: item.value,
+              ...(item.tolerancePercent ? { tolerancePercent: item.tolerancePercent } : {}),
+            },
+          };
+
+          const res = await fetch("/api/chat/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, storeId }),
+          });
+
+          const data = await res.json();
+          if (data.success) {
+            results.push(data.message);
+          } else {
+            results.push(`${item.productName}: ${data.error || "실패"}`);
+            allSuccess = false;
+          }
+        }
+
+        setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, fuzzyStatus: "confirmed" as const } : m));
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: allSuccess
+              ? `✅ ${menuName} 레시피 ${results.length}개 항목 저장 완료`
+              : `⚠️ ${menuName} 레시피 일부 실패:\n${results.join("\n")}`,
+          },
+        ]);
+        if (allSuccess) window.dispatchEvent(new Event("onis-data-updated"));
+      } else if (fuzzyMode === "sauce") {
+        // 소스 레시피: execute route로 하나씩 전송
+        const sauceProduct = fuzzyContext?.sauceMatched || msg.fuzzyContext?.sauceMatched;
+        if (!sauceProduct) {
+          setMessages((prev) => [...prev, { role: "assistant", content: "소스 제품을 선택해주세요." }]);
+          setLoading(false);
+          setSaving(false);
+          return;
+        }
+
+        const results: string[] = [];
+        let allSuccess = true;
+
+        // 먼저 새 제품 생성
+        for (const item of items) {
+          if (item.isNew) {
+            await fetch("/api/chat/bulk-inventory", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                storeId,
+                date: selectedDate.toISOString().slice(0, 10),
+                items: [{
+                  inputName: item.inputName,
+                  value: 0,
+                  isNew: true,
+                  newProductName: item.productName,
+                  newProductUnit: item.newUnit,
+                  newProductCategoryId: item.newCategoryId,
+                }],
+              }),
+            });
+          }
+        }
+
+        for (const item of items) {
+          const action = {
+            type: "update_sauce_recipe",
+            params: {
+              sauceName: sauceProduct.name,
+              ingredientName: item.productName,
+              amount: item.value,
+            },
+          };
+
+          const res = await fetch("/api/chat/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action, storeId }),
+          });
+
+          const data = await res.json();
+          if (data.success) {
+            results.push(data.message);
+          } else {
+            results.push(`${item.productName}: ${data.error || "실패"}`);
+            allSuccess = false;
+          }
+        }
+
+        setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, fuzzyStatus: "confirmed" as const } : m));
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: allSuccess
+              ? `✅ ${sauceProduct.name} 소스 레시피 ${results.length}개 항목 저장 완료`
+              : `⚠️ ${sauceProduct.name} 소스 레시피 일부 실패:\n${results.join("\n")}`,
+          },
+        ]);
+        if (allSuccess) window.dispatchEvent(new Event("onis-data-updated"));
+      }
+    } catch {
+      setMessages((prev) => [...prev, { role: "assistant", content: "저장 중 오류가 발생했습니다." }]);
+    } finally {
+      setLoading(false);
+      setSaving(false);
+    }
+  };
+
+  const handleFuzzyCancel = (msgIndex: number) => {
+    setMessages((prev) =>
+      prev.map((m, i) => i === msgIndex ? { ...m, fuzzyStatus: "rejected" as const } : m)
+    );
+    setMessages((prev) => [...prev, { role: "assistant", content: "취소되었습니다." }]);
   };
 
   const handleConfirmAction = async (msgIndex: number) => {
@@ -205,7 +473,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
         const res = await fetch("/api/chat/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: act, storeId }),
+          body: JSON.stringify({ action: { ...act, params: { ...act.params, date: selectedDate.toISOString().slice(0, 10) } }, storeId }),
         });
 
         const data = await res.json();
@@ -217,25 +485,16 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
         }
       }
 
-      setMessages((prev) =>
-        prev.map((m, i) =>
-          i === msgIndex ? { ...m, actionStatus: "confirmed" as const } : m
-        )
-      );
-
+      setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, actionStatus: "confirmed" as const } : m));
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: allSuccess
-            ? `✅ ${results.join("\n")}`
-            : `⚠️ 일부 실패:\n${results.join("\n")}`,
+          content: allSuccess ? `✅ ${results.join("\n")}` : `⚠️ 일부 실패:\n${results.join("\n")}`,
         },
       ]);
 
-      if (allSuccess) {
-        window.dispatchEvent(new Event("onis-data-updated"));
-      }
+      if (allSuccess) window.dispatchEvent(new Event("onis-data-updated"));
     } catch {
       setMessages((prev) => [...prev, { role: "assistant", content: "실행 중 오류가 발생했습니다." }]);
     } finally {
@@ -245,18 +504,22 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
   };
 
   const handleRejectAction = (msgIndex: number) => {
-    setMessages((prev) =>
-      prev.map((m, i) =>
-        i === msgIndex ? { ...m, actionStatus: "rejected" as const } : m
-      )
-    );
+    setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, actionStatus: "rejected" as const } : m));
     setMessages((prev) => [...prev, { role: "assistant", content: "취소되었습니다." }]);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    // inventory/recipe/sauce 모드에서는 Enter로 줄바꿈, Ctrl+Enter로 전송
+    if (mode === "inventory" || mode === "recipe" || mode === "sauce") {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        handleSend();
+      }
+    } else {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
     }
   };
 
@@ -273,14 +536,15 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
 
   const placeholders: Record<ChatMode, string> = {
     chat: "질문을 입력하세요...",
-    recipe: "메뉴명: 재료 용량, 재료 용량...",
-    sauce: "소스명: 재료 용량, 재료 용량...",
-    inventory: "제품명 수량 5, 잔량 200...",
+    recipe: "메뉴명: 재료 용량, 재료 용량... (Ctrl+Enter)",
+    sauce: "소스명: 재료 용량, 재료 용량... (Ctrl+Enter)",
+    inventory: "제품명 잔량 (여러 줄 → Ctrl+Enter)",
   };
+
+  const maxLength = 3000;
 
   return (
     <>
-    {/* 저장중 오버레이 */}
     {saving && (
       <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40">
         <div className="bg-background rounded-xl px-8 py-6 shadow-2xl flex flex-col items-center gap-3">
@@ -342,9 +606,30 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
               </div>
             )}
 
+            {/* 퍼지 매칭 리뷰 패널 */}
+            {msg.fuzzyResults && msg.fuzzyStatus === "pending" && (
+              <div className="mt-2 ml-1 max-w-[95%]">
+                <FuzzyMatchReview
+                  results={msg.fuzzyResults}
+                  categories={msg.fuzzyCategories || []}
+                  mode={msg.fuzzyMode}
+                  context={msg.fuzzyContext || undefined}
+                  onConfirm={(items, ctx) => handleFuzzyConfirm(i, items, ctx)}
+                  onCancel={() => handleFuzzyCancel(i)}
+                  disabled={loading}
+                />
+              </div>
+            )}
+            {msg.fuzzyResults && msg.fuzzyStatus === "confirmed" && (
+              <div className="text-xs text-muted-foreground mt-1 ml-1">적용 완료</div>
+            )}
+            {msg.fuzzyResults && msg.fuzzyStatus === "rejected" && (
+              <div className="text-xs text-muted-foreground mt-1 ml-1">취소됨</div>
+            )}
+
+            {/* 기존 액션 미리보기 */}
             {msg.action && msg.actionStatus === "pending" && (
               <div className="mt-2 ml-1 max-w-[90%]">
-                {/* 미리보기 표 */}
                 <div className="border rounded-md overflow-hidden text-xs mb-2">
                   <table className="w-full">
                     <thead>
@@ -379,6 +664,17 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
                             <th className="px-2 py-1.5 text-right font-medium">사용량</th>
                           </>
                         )}
+                        {msg.action.actions[0]?.type === "update_inventory" && (
+                          <>
+                            <th className="px-2 py-1.5 text-left font-medium">제품명</th>
+                            {msg.action.actions.some((a) => a.params.quantity !== undefined) && (
+                              <th className="px-2 py-1.5 text-right font-medium">수량</th>
+                            )}
+                            {msg.action.actions.some((a) => a.params.remaining !== undefined) && (
+                              <th className="px-2 py-1.5 text-right font-medium">잔량</th>
+                            )}
+                          </>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -390,9 +686,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
                               <td className="px-2 py-1">{act.params.productName}</td>
                               <td className="px-2 py-1 text-right font-mono">{act.params.amount}</td>
                               {msg.action!.actions.some((a) => a.params.tolerancePercent) && (
-                                <td className="px-2 py-1 text-right font-mono">
-                                  {act.params.tolerancePercent || "-"}
-                                </td>
+                                <td className="px-2 py-1 text-right font-mono">{act.params.tolerancePercent || "-"}</td>
                               )}
                             </>
                           )}
@@ -418,33 +712,29 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
                               <td className="px-2 py-1 text-right font-mono">{act.params.amount}</td>
                             </>
                           )}
+                          {act.type === "update_inventory" && (
+                            <>
+                              <td className="px-2 py-1">{act.params.productName}</td>
+                              {msg.action!.actions.some((a) => a.params.quantity !== undefined) && (
+                                <td className="px-2 py-1 text-right font-mono">{act.params.quantity ?? "-"}</td>
+                              )}
+                              {msg.action!.actions.some((a) => a.params.remaining !== undefined) && (
+                                <td className="px-2 py-1 text-right font-mono">{act.params.remaining ?? "-"}</td>
+                              )}
+                            </>
+                          )}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                {/* 확인/취소 버튼 */}
                 <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="default"
-                    className="h-7 text-xs gap-1"
-                    onClick={() => handleConfirmAction(i)}
-                    disabled={loading}
-                  >
-                    <Check className="h-3 w-3" />
-                    확인
+                  <Button size="sm" variant="default" className="h-7 text-xs gap-1" onClick={() => handleConfirmAction(i)} disabled={loading}>
+                    <Check className="h-3 w-3" /> 확인
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs gap-1"
-                    onClick={() => handleRejectAction(i)}
-                    disabled={loading}
-                  >
-                    <XCircle className="h-3 w-3" />
-                  취소
-                </Button>
+                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={() => handleRejectAction(i)} disabled={loading}>
+                    <XCircle className="h-3 w-3" /> 취소
+                  </Button>
                 </div>
               </div>
             )}
@@ -475,8 +765,8 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={placeholders[mode]}
-            rows={2}
-            maxLength={500}
+            rows={mode === "chat" ? 2 : 3}
+            maxLength={maxLength}
             className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
           />
           <Button
@@ -490,10 +780,12 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
         </div>
         <div className="flex justify-between mt-1">
           <div className="text-[10px] text-muted-foreground">
-            #레시피입력 · #자체소스레시피입력 · #현재재고입력 · #/
+            {mode === "chat"
+              ? "#레시피입력 · #자체소스레시피입력 · #현재재고입력 · #/"
+              : "Ctrl+Enter 전송 · #/ 돌아가기"}
           </div>
           <div className="text-xs text-muted-foreground">
-            {input.length}/500
+            {input.length}/{maxLength}
           </div>
         </div>
       </div>
