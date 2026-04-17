@@ -174,41 +174,25 @@ export function DeliveryList({ storeId }: Props) {
         // 현재 스냅샷 조회
         const { data: snapshot } = await supabase
           .from("inventory_snapshots")
-          .select("id, quantity, remaining")
+          .select("id, remaining")
           .eq("product_id", item.product_id)
           .eq("date", today)
           .single();
 
-        // 제품의 단위 조회
-        const { data: product } = await supabase
-          .from("products")
-          .select("unit")
-          .eq("id", item.product_id)
-          .single();
-
-        const unitValue = parseFloat(product?.unit || "0") || 0;
-
         if (snapshot) {
-          const currentTotal = (snapshot.quantity * (unitValue || 1)) + snapshot.remaining;
-          const newTotal = currentTotal + receivedGrams;
-          const newQty = unitValue > 0 ? Math.floor(newTotal / unitValue) : 0;
-          const newRem = unitValue > 0 ? newTotal - newQty * unitValue : newTotal;
+          const newRemaining = (snapshot.remaining || 0) + receivedGrams;
 
           await supabase
             .from("inventory_snapshots")
-            .update({ quantity: newQty, remaining: Math.round(newRem * 100) / 100 })
+            .update({ remaining: Math.round(newRemaining * 100) / 100 })
             .eq("id", snapshot.id);
         } else {
-          const newQty = unitValue > 0 ? Math.floor(receivedGrams / unitValue) : 0;
-          const newRem = unitValue > 0 ? receivedGrams - newQty * unitValue : receivedGrams;
-
           await supabase
             .from("inventory_snapshots")
             .insert({
               product_id: item.product_id,
               date: today,
-              quantity: newQty,
-              remaining: Math.round(newRem * 100) / 100,
+              remaining: Math.round(receivedGrams * 100) / 100,
             });
         }
       }

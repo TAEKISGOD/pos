@@ -296,7 +296,7 @@ export function SupplierManager({ storeId }: Props) {
                     <TableHead className="min-w-[120px]">제품명</TableHead>
                     <TableHead className="min-w-[80px]">카테고리</TableHead>
                     <TableHead className="min-w-[140px]">발주 업체</TableHead>
-                    <TableHead className="min-w-[100px]">임계값</TableHead>
+                    <TableHead className="min-w-[100px]">임계값(g)</TableHead>
                     <TableHead className="min-w-[100px]">발주 수량</TableHead>
                     <TableHead className="min-w-[80px]">발주 단위</TableHead>
                     <TableHead className="min-w-[80px]">실제량</TableHead>

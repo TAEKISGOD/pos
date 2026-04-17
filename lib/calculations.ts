@@ -37,7 +37,7 @@ export async function calculateUpdatedInventory(
 
   if (!products || products.length === 0) return [];
 
-  // 2. 현재재고 스냅샷 (현재재고 = 용량 × 수량 + 잔량)
+  // 2. 현재재고 스냅샷 (잔량 = 총 재고량 g)
   const productIds = products.map((p) => p.id);
   const { data: snapshots } = await supabase
     .from("inventory_snapshots")
@@ -50,8 +50,7 @@ export async function calculateUpdatedInventory(
 
   const inventoryMap: Record<string, number> = {};
   snapshots?.forEach((s) => {
-    const unitValue = productUnitMap[s.product_id] || 0;
-    inventoryMap[s.product_id] = unitValue * (s.quantity || 0) + (s.remaining || 0);
+    inventoryMap[s.product_id] = s.remaining || 0;
   });
 
   // 3. 메뉴 + 레시피

@@ -162,14 +162,10 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
       const upserts = filtered.map((r) => {
         const sauceEffect = sauceEffectMap[r.productId] || 0;
         const total = manualOverrides[r.productId] ?? (r.newQuantity + sauceEffect);
-        const unitValue = parseFloat(r.productUnit) || 0;
-        const qty = unitValue > 0 ? Math.floor(total / unitValue) : 0;
-        const rem = unitValue > 0 ? total - qty * unitValue : total;
         return {
           product_id: r.productId,
           date: nextDateStr,
-          quantity: qty,
-          remaining: Math.round(rem * 100) / 100,
+          remaining: Math.round(total * 100) / 100,
         };
       });
 
@@ -231,21 +227,18 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
     const supplierMap: Record<string, string> = {};
     suppliers?.forEach((s) => { supplierMap[s.id] = s.name; });
 
-    // 임계값 이하 제품 필터 (newQty는 g 총량이므로 수량(개수)으로 변환하여 비교)
+    // 임계값 이하 제품 필터 (잔량(g) 기준으로 직접 비교)
     const recommendations: OrderRecommendation[] = [];
     for (const ps of psData) {
       const newQtyGrams = allNewQuantities[ps.product_id];
       if (newQtyGrams === undefined) continue;
       const result = results.find((r) => r.productId === ps.product_id);
-      const unitValue = parseFloat(result?.productUnit || "0") || 0;
-      // g총량 → 수량으로 변환: ex) 40g / 100g = 0.4개
-      const newQtyUnits = unitValue > 0 ? Math.round((newQtyGrams / unitValue) * 100) / 100 : newQtyGrams;
 
-      if (newQtyUnits <= ps.threshold && ps.order_quantity > 0) {
+      if (newQtyGrams <= ps.threshold && ps.order_quantity > 0) {
         recommendations.push({
           productId: ps.product_id,
           productName: result?.productName || "알 수 없음",
-          newQuantity: newQtyUnits,
+          newQuantity: Math.round(newQtyGrams * 100) / 100,
           threshold: ps.threshold,
           orderQuantity: ps.order_quantity,
           orderUnit: ps.order_unit || "",

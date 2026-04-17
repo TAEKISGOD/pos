@@ -227,9 +227,14 @@ export function MenuRecipe({ activeCategory, storeId }: Props) {
 
   // Sheet data
   const EXTRA_MENU_SLOTS = 100;
+  const usedIds = new Set(menus.map((m) => m.id));
   const allMenuSlots = [
     ...menus.map((m) => ({ id: m.id, name: m.name, product_code: m.product_code || "", isNew: false })),
-    ...Array.from({ length: EXTRA_MENU_SLOTS }, (_, i) => ({ id: `__newmenu_${i}`, name: "", product_code: "", isNew: true })),
+    ...Array.from({ length: EXTRA_MENU_SLOTS }, (_, i) => {
+      const id = `__newmenu_${i}`;
+      if (usedIds.has(id)) return null;
+      return { id, name: "", product_code: "", isNew: true };
+    }).filter((s): s is NonNullable<typeof s> => s !== null),
   ];
 
   // 컬럼: 헤더 없이 (공백), 전부 editable

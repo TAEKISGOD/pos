@@ -16,6 +16,11 @@ function checkRateLimit(userId: string): boolean {
   return true;
 }
 
+/** @ 기호 제거 + trim */
+function normalizeName(raw: unknown): string {
+  return String(raw ?? "").replace(/^@+/, "").trim();
+}
+
 interface DbProduct {
   id: string;
   name: string;
@@ -59,6 +64,8 @@ ${MATCHING_RULES}
 추가 규칙:
 - 제품명에 숫자가 붙어있으면 제품명의 일부일 수 있습니다 (예: "빵가루1000"은 제품명).
 - 제품명과 숫자가 공백으로 구분되면 숫자는 잔량입니다.
+- 숫자 뒤에 단위(g, ml, kg, EA 등)가 붙어있으면 무시하고 숫자만 추출하세요 (예: "2000g" → value: 2000).
+- "냉동 관자"처럼 공백이 포함된 제품명도 인식하세요. 마지막 숫자(+단위)만 잔량입니다.
 
 【출력 형식】 반드시 아래 JSON만 출력하세요:
 {
@@ -71,13 +78,22 @@ ${MATCHING_RULES}
       "candidates": ["후보1", "후보2"]
     }
   ]
+}
+
+【실패 처리】
+처리할 수 없는 입력이면 다음 형식으로 응답하세요:
+{
+  "error": true,
+  "errorReason": "parse_failed",
+  "description": "구체적인 실패 이유 설명"
 }`;
 }
 
 function buildRecipePrompt(productList: string, menuList: string): string {
-  return `당신은 메뉴 레시피 매칭 어시스턴트입니다.
+  return `당신은 메뉴 레시피 및 자체소스 레시피 매칭 어시스턴트입니다.
 
-사용자가 입력한 메뉴 레시피의 각 재료를 아래 DB 제품 목록과 매칭해주세요.
+사용자가 입력한 레시피의 각 재료를 아래 DB 제품 목록과 매칭해주세요.
+메뉴 레시피와 자체소스 레시피 모두 처리할 수 있습니다.
 
 【DB 제품 목록】
 ${productList}
@@ -87,62 +103,58 @@ ${menuList || "(등록된 메뉴 없음)"}
 
 ${MATCHING_RULES}
 
-추가 규칙:
-- 사용자 입력에서 메뉴명과 재료를 분리하세요.
-- 메뉴명은 보통 첫 줄이나 콜론(:) 앞에 있습니다.
-- 각 재료에서 제품명과 사용량(숫자)을 추출하세요.
-- 오차범위가 명시되어 있으면 tolerancePercent로 추출하세요 (예: "오차 5%").
-- 메뉴명이 등록된 메뉴 목록에 없으면 그대로 menuName에 적어주세요.
+【메뉴/소스 구분 규칙】
+- @는 메뉴명 구분 기호입니다. @ 뒤의 텍스트만 메뉴명으로 추출하세요.
+  예: 입력 "@잭콕" → menuName은 "잭콕" (반드시 @ 기호 제거)
+      입력 "@순두부 쫄면" → menuName은 "순두부 쫄면"
+- 최종 JSON의 menuName 필드에는 절대로 @ 기호를 포함하지 마세요.
+- 소스명(sauceName)에도 동일하게 적용됩니다.
+- @가 없는 경우: 첫 줄 또는 콜론(:) 앞이 메뉴/소스명이고, 빈 줄을 메뉴 경계로 추정하세요.
+- 메뉴명이 "자체소스" 카테고리의 제품명과 매칭되면 recipeType: "sauce"로 분류하세요.
+- 그 외에는 recipeType: "menu"로 분류하세요.
 
-【출력 형식】 반드시 아래 JSON만 출력하세요:
+【재료 파싱 규칙】
+- 각 재료에서 제품명과 사용량(숫자)을 추출하세요.
+- 잔 종류(하이볼잔, 언더락잔, 허리케인글라스 등)는 재료가 아닙니다 → "glassware" 필드로 분리
+- 가니쉬/데코(라임 웻지, 체리, 시나몬스틱 등)와 조리 지시(섞고, 얹져서, 천천히 따라서)는 재료가 아닙니다 → "garnish" 또는 "note" 필드로 분리
+- 수량이 없는 재료 줄은 value를 null로 설정하세요.
+- 오차범위가 명시되어 있으면 tolerancePercent로 추출하세요.
+
+【출력 형식】 반드시 아래 JSON만 출력하세요. 단일 메뉴도 menus 배열에 1개 원소로 반환:
 {
-  "menuName": "메뉴명",
-  "results": [
+  "menus": [
     {
-      "inputName": "사용자가 입력한 재료명",
-      "value": 숫자(사용량),
-      "tolerancePercent": 숫자 또는 0,
-      "status": "auto" | "candidate" | "none",
-      "matchedProduct": "매칭된 DB 제품명 (auto일 때만)",
-      "candidates": ["후보1", "후보2"]
+      "menuName": "메뉴명 또는 소스명 (입력 그대로)",
+      "recipeType": "menu" | "sauce",
+      "glassware": "잔 종류 (있을 때만, 없으면 null)",
+      "garnish": "가니쉬/데코 설명 (있을 때만, 없으면 null)",
+      "note": "기타 조리 지시사항 (있을 때만, 없으면 null)",
+      "sauceStatus": "auto | candidate | none (sauce일 때만)",
+      "sauceMatchedProduct": "매칭된 소스 제품명 (sauce + auto일 때만)",
+      "sauceCandidates": ["후보1", "후보2"],
+      "results": [
+        {
+          "inputName": "사용자가 입력한 재료명",
+          "value": 숫자(사용량) 또는 null,
+          "tolerancePercent": 숫자 또는 0,
+          "status": "auto" | "candidate" | "none",
+          "matchedProduct": "매칭된 DB 제품명 (auto일 때만)",
+          "candidates": ["후보1", "후보2"]
+        }
+      ]
     }
   ]
-}`;
 }
 
-function buildSaucePrompt(productList: string): string {
-  return `당신은 자체소스 레시피 매칭 어시스턴트입니다.
-
-사용자가 입력한 자체소스 레시피의 각 재료를 아래 DB 제품 목록과 매칭해주세요.
-
-【DB 제품 목록】
-${productList}
-
-${MATCHING_RULES}
-
-추가 규칙:
-- 사용자 입력에서 소스명과 재료를 분리하세요.
-- 소스명은 보통 첫 줄이나 콜론(:) 앞에 있습니다.
-- 소스명도 DB 제품 목록에 있는 제품이어야 합니다 (보통 "자체소스" 카테고리).
-- 소스명도 매칭 규칙에 따라 매칭하세요.
-- 각 재료에서 제품명과 사용량(숫자)을 추출하세요.
-
-【출력 형식】 반드시 아래 JSON만 출력하세요:
+【실패 처리】
+처리할 수 없는 경우 다음 형식으로 응답하세요:
 {
-  "sauceName": "소스 제품명 (입력 그대로)",
-  "sauceStatus": "auto" | "candidate" | "none",
-  "sauceMatchedProduct": "매칭된 DB 제품명 (auto일 때만)",
-  "sauceCandidates": ["후보1", "후보2"],
-  "results": [
-    {
-      "inputName": "사용자가 입력한 재료명",
-      "value": 숫자(사용량),
-      "status": "auto" | "candidate" | "none",
-      "matchedProduct": "매칭된 DB 제품명 (auto일 때만)",
-      "candidates": ["후보1", "후보2"]
-    }
-  ]
-}`;
+  "error": true,
+  "errorReason": "parse_failed" | "menu_not_found" | "product_ambiguous",
+  "description": "구체적인 실패 이유를 한국어로 설명",
+  "failedItems": ["문제가 된 항목"]
+}
+절대 추측이나 임의 매칭으로 진행하지 마세요.`;
 }
 
 export async function POST(request: Request) {
@@ -150,16 +162,25 @@ export async function POST(request: Request) {
     const { message, storeId, userId, mode = "inventory" } = await request.json();
 
     if (!message || typeof message !== "string") {
-      return Response.json({ error: "메시지를 입력해주세요." }, { status: 400 });
+      return Response.json({
+        success: false,
+        error: "메시지를 입력해주세요.",
+        errorType: "parse_failed",
+      }, { status: 400 });
     }
     if (!storeId || !userId) {
-      return Response.json({ error: "인증 정보가 없습니다." }, { status: 401 });
+      return Response.json({
+        success: false,
+        error: "인증 정보가 없습니다.",
+        errorType: "permission_denied",
+      }, { status: 401 });
     }
     if (!checkRateLimit(userId)) {
-      return Response.json(
-        { error: `일일 요청 한도(${DAILY_LIMIT}회)를 초과했습니다.` },
-        { status: 429 }
-      );
+      return Response.json({
+        success: false,
+        error: `일일 요청 한도(${DAILY_LIMIT}회)를 초과했습니다. 내일 다시 시도해주세요.`,
+        errorType: "rate_limited",
+      }, { status: 429 });
     }
 
     const supabase = createServerSupabaseClient();
@@ -199,7 +220,6 @@ export async function POST(request: Request) {
     // 모드별 프롬프트 구성
     let systemPrompt: string;
     if (mode === "recipe") {
-      // 메뉴 목록 가져오기
       const { data: menus } = await supabase
         .from("menus")
         .select("name")
@@ -207,13 +227,10 @@ export async function POST(request: Request) {
         .order("created_at");
       const menuList = (menus || []).map((m) => m.name).join(", ");
       systemPrompt = buildRecipePrompt(productList, menuList);
-    } else if (mode === "sauce") {
-      systemPrompt = buildSaucePrompt(productList);
     } else {
       systemPrompt = buildInventoryPrompt(productList);
     }
 
-    // LLM이 파싱 + 매칭을 한번에 수행
     const openai = getOpenAIClient();
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -221,7 +238,7 @@ export async function POST(request: Request) {
         { role: "system", content: systemPrompt },
         { role: "user", content: message },
       ],
-      max_tokens: 3000,
+      max_tokens: 4000,
       temperature: 0.1,
     });
 
@@ -234,37 +251,155 @@ export async function POST(request: Request) {
         parsed = JSON.parse(jsonMatch[0]);
       }
     } catch {
-      return Response.json({ error: "매칭 처리에 실패했습니다. 다시 시도해주세요." }, { status: 500 });
+      return Response.json({
+        success: false,
+        error: "AI 응답을 해석할 수 없습니다. 입력을 더 간단히 나눠서 다시 시도해 주세요.",
+        errorType: "llm_error",
+      }, { status: 500 });
     }
 
+    // LLM이 에러를 반환한 경우
+    if (parsed.error) {
+      return Response.json({
+        success: false,
+        error: (parsed.description as string) || "처리할 수 없는 입력입니다.",
+        errorType: (parsed.errorReason as string) || "parse_failed",
+        details: {
+          failedItems: parsed.failedItems || [],
+        },
+      }, { status: 400 });
+    }
+
+    const productMap = new Map(dbProducts.map((p) => [p.name, p]));
+
+    // ─── 레시피 모드: 다중 메뉴 배열 처리 ───
+    if (mode === "recipe") {
+      const menusRaw = (parsed.menus || []) as {
+        menuName: string;
+        recipeType?: "menu" | "sauce";
+        glassware?: string | null;
+        garnish?: string | null;
+        note?: string | null;
+        sauceStatus?: string;
+        sauceMatchedProduct?: string;
+        sauceCandidates?: string[];
+        results: {
+          inputName: string;
+          value: number | null;
+          tolerancePercent?: number;
+          status: "auto" | "candidate" | "none";
+          matchedProduct?: string;
+          candidates?: string[];
+        }[];
+      }[];
+
+      if (menusRaw.length === 0) {
+        return Response.json({
+          success: false,
+          error: "입력에서 메뉴명을 찾지 못했습니다. `@메뉴명` 형식으로 시작해 주세요.",
+          errorType: "parse_failed",
+          details: { suggestion: "@메뉴명 형식으로 메뉴를 구분해 주세요." },
+        }, { status: 400 });
+      }
+
+      const menus = menusRaw.map((menu) => {
+        const recipeType = menu.recipeType || "menu";
+        // @ 기호 정규화
+        const cleanMenuName = normalizeName(menu.menuName);
+
+        const results = (menu.results || []).map((item) => {
+          const base: Record<string, unknown> = {
+            inputName: normalizeName(item.inputName),
+            value: item.value ?? 0,
+          };
+          if (item.tolerancePercent) base.tolerancePercent = item.tolerancePercent;
+
+          if (item.status === "auto" && item.matchedProduct) {
+            const product = productMap.get(item.matchedProduct);
+            if (product) return { ...base, status: "auto" as const, matched: product };
+            return { ...base, status: "none" as const };
+          }
+
+          if (item.status === "candidate" && item.candidates?.length) {
+            const candidateProducts = item.candidates
+              .map((name) => productMap.get(name))
+              .filter((p): p is DbProduct => !!p)
+              .map((p, i) => ({ product: p, score: 0.8 - i * 0.1, matchType: "substring" as const }));
+            if (candidateProducts.length > 0) {
+              return { ...base, status: "candidate" as const, candidates: candidateProducts };
+            }
+            return { ...base, status: "none" as const };
+          }
+
+          return { ...base, status: "none" as const };
+        });
+
+        // 컨텍스트 구성
+        const context: Record<string, unknown> = {};
+        if (recipeType === "sauce") {
+          context.sauceName = cleanMenuName;
+          context.sauceStatus = menu.sauceStatus || "none";
+          if (menu.sauceStatus === "auto" && menu.sauceMatchedProduct) {
+            const sp = productMap.get(normalizeName(menu.sauceMatchedProduct));
+            if (sp) context.sauceMatched = sp;
+            else context.sauceStatus = "none";
+          } else if (menu.sauceStatus === "candidate" && menu.sauceCandidates) {
+            const sc = menu.sauceCandidates
+              .map((name) => productMap.get(normalizeName(name)))
+              .filter((p): p is DbProduct => !!p);
+            if (sc.length > 0) context.sauceCandidates = sc;
+            else context.sauceStatus = "none";
+          }
+        } else {
+          context.menuName = cleanMenuName;
+        }
+
+        return {
+          menuName: cleanMenuName,
+          recipeType,
+          glassware: menu.glassware || null,
+          garnish: menu.garnish || null,
+          note: menu.note || null,
+          results,
+          context,
+        };
+      });
+
+      return Response.json({
+        menus,
+        categories: categoryList,
+        products: dbProducts,
+        mode: "recipe",
+      });
+    }
+
+    // ─── 재고 모드 ───
     const llmResults = (parsed.results || []) as {
       inputName: string;
       value: number;
-      tolerancePercent?: number;
       status: "auto" | "candidate" | "none";
       matchedProduct?: string;
       candidates?: string[];
     }[];
 
     if (llmResults.length === 0) {
-      return Response.json({ error: "입력에서 항목을 찾을 수 없습니다." }, { status: 400 });
+      return Response.json({
+        success: false,
+        error: "입력에서 항목을 찾을 수 없습니다. \"제품명 잔량\" 형식으로 입력해 주세요.",
+        errorType: "parse_failed",
+        details: { suggestion: "제품명과 숫자를 공백으로 구분하여 입력하세요." },
+      }, { status: 400 });
     }
-
-    // LLM 결과를 FuzzyMatchReview 형식으로 변환
-    const productMap = new Map(dbProducts.map((p) => [p.name, p]));
 
     const results = llmResults.map((item) => {
       const base: Record<string, unknown> = {
         inputName: item.inputName,
         value: item.value,
       };
-      if (item.tolerancePercent) base.tolerancePercent = item.tolerancePercent;
 
       if (item.status === "auto" && item.matchedProduct) {
         const product = productMap.get(item.matchedProduct);
-        if (product) {
-          return { ...base, status: "auto" as const, matched: product };
-        }
+        if (product) return { ...base, status: "auto" as const, matched: product };
         return { ...base, status: "none" as const };
       }
 
@@ -273,7 +408,6 @@ export async function POST(request: Request) {
           .map((name) => productMap.get(name))
           .filter((p): p is DbProduct => !!p)
           .map((p, i) => ({ product: p, score: 0.8 - i * 0.1, matchType: "substring" as const }));
-
         if (candidateProducts.length > 0) {
           return { ...base, status: "candidate" as const, candidates: candidateProducts };
         }
@@ -283,38 +417,18 @@ export async function POST(request: Request) {
       return { ...base, status: "none" as const };
     });
 
-    // 컨텍스트 정보 구성 (레시피/소스)
-    const context: Record<string, unknown> = {};
-
-    if (mode === "recipe") {
-      context.menuName = parsed.menuName || "";
-    }
-
-    if (mode === "sauce") {
-      context.sauceName = parsed.sauceName || "";
-      context.sauceStatus = parsed.sauceStatus || "none";
-      // 소스명 매칭 처리
-      if (parsed.sauceStatus === "auto" && parsed.sauceMatchedProduct) {
-        const sp = productMap.get(parsed.sauceMatchedProduct as string);
-        if (sp) context.sauceMatched = sp;
-        else context.sauceStatus = "none";
-      } else if (parsed.sauceStatus === "candidate" && parsed.sauceCandidates) {
-        const sc = (parsed.sauceCandidates as string[])
-          .map((name) => productMap.get(name))
-          .filter((p): p is DbProduct => !!p);
-        if (sc.length > 0) context.sauceCandidates = sc;
-        else context.sauceStatus = "none";
-      }
-    }
-
     return Response.json({
       results,
       categories: categoryList,
-      context: Object.keys(context).length > 0 ? context : undefined,
-      mode,
+      products: dbProducts,
+      mode: "inventory",
     });
   } catch (error: unknown) {
     console.error("Fuzzy match API error:", error);
-    return Response.json({ error: "서버 오류가 발생했습니다." }, { status: 500 });
+    return Response.json({
+      success: false,
+      error: "서버와 통신에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+      errorType: "network_error",
+    }, { status: 500 });
   }
 }

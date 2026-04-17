@@ -84,7 +84,7 @@ export async function POST(request: Request) {
         // 해당 날짜 스냅샷 upsert
         const { data: existing } = await supabase
           .from("inventory_snapshots")
-          .select("id, quantity, remaining")
+          .select("id, remaining")
           .eq("product_id", productId)
           .eq("date", date)
           .single();
@@ -104,7 +104,6 @@ export async function POST(request: Request) {
           const { error } = await supabase.from("inventory_snapshots").insert({
             product_id: productId,
             date,
-            quantity: 0,
             remaining: item.value,
           });
 
