@@ -40,6 +40,7 @@ export interface ResolvedItem {
 export interface FuzzyContext {
   menuName?: string;
   sauceName?: string;
+  batchSize?: number;
   sauceStatus?: "auto" | "candidate" | "none";
   sauceMatched?: DbProduct;
   sauceCandidates?: DbProduct[];

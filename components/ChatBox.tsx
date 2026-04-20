@@ -38,6 +38,7 @@ interface Message {
 interface MenuFuzzyData {
   menuName: string;
   recipeType: "menu" | "sauce";
+  batchSize?: number | null;
   glassware?: string | null;
   garnish?: string | null;
   note?: string | null;
@@ -536,6 +537,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
               type: "update_sauce_recipes",
               params: {
                 sauceName: sauceProduct!.name,
+                ...(fuzzyContext?.batchSize ? { batchSize: fuzzyContext.batchSize } : {}),
                 recipes: items.map((item) => ({
                   ingredientName: item.productName,
                   amount: item.value,

@@ -48,6 +48,19 @@ export async function calculateUpdatedInventory(
   const productUnitMap: Record<string, number> = {};
   products.forEach((p) => { productUnitMap[p.id] = parseFloat(p.unit) || 0; });
 
+  // 자체소스 카테고리 제품 식별 (batch_size 기반 차감용)
+  const sauceCat = categories.find((c) => c.name === "자체소스");
+  const sauceProductIds = new Set<string>();
+  const productBatchSizeMap: Record<string, number> = {};
+  if (sauceCat) {
+    products.forEach((p) => {
+      if (p.category_id === sauceCat.id) {
+        sauceProductIds.add(p.id);
+        productBatchSizeMap[p.id] = p.batch_size ?? 1;
+      }
+    });
+  }
+
   const inventoryMap: Record<string, number> = {};
   snapshots?.forEach((s) => {
     inventoryMap[s.product_id] = s.remaining || 0;
@@ -82,11 +95,23 @@ export async function calculateUpdatedInventory(
     salesData?.forEach((s) => (salesMap[s.menu_id] = s.quantity));
 
     // 레시피 * 판매수량 = 사용량
+    // 자체소스 제품: (용량 / batch_size) × 사용량 × 판매수량
     recipes?.forEach((recipe) => {
       const salesQty = salesMap[recipe.menu_id] || 0;
       if (salesQty === 0) return;
 
-      const usage = recipe.amount * salesQty;
+      let usage: number;
+      if (sauceProductIds.has(recipe.product_id)) {
+        // 자체소스: (용량 / batch_size) × amount × salesQty
+        const unitValue = productUnitMap[recipe.product_id] || 0;
+        const batchSize = productBatchSizeMap[recipe.product_id] || 1;
+        const perBatch = batchSize > 0 ? unitValue / batchSize : unitValue;
+        usage = perBatch * recipe.amount * salesQty;
+      } else {
+        // 일반 제품: amount × salesQty
+        usage = recipe.amount * salesQty;
+      }
+
       const toleranceRatio = recipe.tolerance_percent / 100;
 
       if (!usageMap[recipe.product_id]) {

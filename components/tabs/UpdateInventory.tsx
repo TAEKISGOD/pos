@@ -28,6 +28,7 @@ interface Props {
 interface SauceProduct {
   id: string;
   name: string;
+  batch_size: number;
 }
 
 interface SauceRecipe {
@@ -99,11 +100,11 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
 
     const { data: sauceProds } = await supabase
       .from("products")
-      .select("id, name")
+      .select("id, name, batch_size")
       .eq("category_id", sauceCat.id)
       .order("created_at");
 
-    if (sauceProds) setSauceProducts(sauceProds);
+    if (sauceProds) setSauceProducts(sauceProds.map((p) => ({ ...p, batch_size: p.batch_size ?? 1 })));
 
     if (sauceProds && sauceProds.length > 0) {
       const { data: recipes } = await supabase
@@ -128,20 +129,20 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
     const effectMap: Record<string, number> = {};
 
     for (const sauceProduct of sauceProducts) {
-      const production = sauceProductions[sauceProduct.id] || 0;
+      const production = sauceProductions[sauceProduct.id] || 0; // 개수 (1 = 1배합분)
       if (production <= 0) continue;
 
+      // 소스 제품 자체의 잔량 증가분은 production 개수만큼
       effectMap[sauceProduct.id] = (effectMap[sauceProduct.id] || 0) + production;
 
       const ingredientRecipes = sauceRecipes.filter(
         (r) => r.sauce_product_id === sauceProduct.id
       );
 
-      const totalRecipeAmount = ingredientRecipes.reduce((sum, r) => sum + r.amount, 0);
-      if (totalRecipeAmount <= 0) continue;
-
+      // 원재료 차감: recipe.amount × production (개수)
+      // 1개 = 레시피 전체 재료량 1세트 차감
       for (const recipe of ingredientRecipes) {
-        const deduction = recipe.amount * (production / totalRecipeAmount);
+        const deduction = recipe.amount * production;
         effectMap[recipe.ingredient_product_id] = (effectMap[recipe.ingredient_product_id] || 0) - deduction;
       }
     }
@@ -492,7 +493,6 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
                 const ingredientRecipes = sauceRecipes.filter(
                   (r) => r.sauce_product_id === sauce.id
                 );
-                const totalRecipeAmount = ingredientRecipes.reduce((sum, r) => sum + r.amount, 0);
                 const production = sauceProductions[sauce.id] || 0;
 
                 return (
@@ -509,7 +509,7 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
                           [sauce.id]: Number(e.target.value),
                         }))}
                       />
-                      <span className="text-sm text-muted-foreground">g</span>
+                      <span className="text-sm text-muted-foreground">개 ({sauce.batch_size}배합 기준)</span>
                     </div>
                     {production > 0 && ingredientRecipes.length > 0 && (
                       <div className="ml-4 text-sm text-muted-foreground space-y-1">
@@ -517,7 +517,7 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
                           const ingredientProduct = results.find(
                             (r) => r.productId === recipe.ingredient_product_id
                           );
-                          const deduction = recipe.amount * (production / totalRecipeAmount);
+                          const deduction = recipe.amount * production;
                           return (
                             <div key={recipe.ingredient_product_id} className="flex gap-2">
                               <span>{ingredientProduct?.productName ?? "알 수 없음"}</span>

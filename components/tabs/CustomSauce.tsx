@@ -18,6 +18,12 @@ interface Product {
   name: string;
 }
 
+interface SauceProduct {
+  id: string;
+  name: string;
+  batch_size: number;
+}
+
 interface Props {
   activeCategory: string;
   storeId: string;
@@ -26,7 +32,7 @@ interface Props {
 export function CustomSauce({ activeCategory, storeId }: Props) {
   const [products, setProducts] = useState<Product[]>([]);
   const [recipes, setRecipes] = useState<Record<string, Record<string, { amount: number; tolerance_percent: number }>>>({});
-  const [sauceProducts, setSauceProducts] = useState<Product[]>([]);
+  const [sauceProducts, setSauceProducts] = useState<SauceProduct[]>([]);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "done">("idle");
   const supabase = createClient();
@@ -57,11 +63,11 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
 
     const { data: sauceProds } = await supabase
       .from("products")
-      .select("id, name")
+      .select("id, name, batch_size")
       .eq("category_id", sauceCat.id)
       .order("created_at");
 
-    if (sauceProds) setSauceProducts(sauceProds);
+    if (sauceProds) setSauceProducts(sauceProds.map((p) => ({ ...p, batch_size: p.batch_size ?? 1 })));
 
     if (sauceProds && sauceProds.length > 0) {
       const { data: existingRecipes } = await supabase
@@ -93,6 +99,10 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
     return () => window.removeEventListener("onis-data-updated", handler);
   }, [fetchData]);
 
+  const updateBatchSize = (sauceId: string, value: number) => {
+    setSauceProducts((prev) => prev.map((p) => p.id === sauceId ? { ...p, batch_size: Math.max(0, value) } : p));
+  };
+
   const updateRecipe = (ingredientId: string, sauceId: string, field: "amount" | "tolerance_percent", value: number) => {
     setRecipes((prev) => ({
       ...prev,
@@ -110,6 +120,7 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
   const saveRecipes = async () => {
     setSaveStatus("saving");
     try {
+      // 레시피 저장 먼저 진행
       const sauceIds = sauceProducts.map((p) => p.id);
       if (sauceIds.length > 0) {
         await supabase.from("custom_sauce_recipes").delete().in("sauce_product_id", sauceIds);
@@ -127,6 +138,18 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
         if (error) { toast({ title: "저장 실패", variant: "destructive" }); setSaveStatus("idle"); return; }
       }
 
+      // batch_size 저장 + 용량(unit) 자동 계산: 저장된 레시피에서 소스별 총 사용량 합산
+      for (const sauce of sauceProducts) {
+        const batchSize = sauce.batch_size <= 0 ? 1 : sauce.batch_size;
+        // 이 소스에 대한 모든 재료 사용량 합산
+        const totalAmount = inserts
+          .filter((r) => r.sauce_product_id === sauce.id)
+          .reduce((sum, r) => sum + r.amount, 0);
+        const unit = totalAmount > 0 ? String(totalAmount) : "g";
+        await supabase.from("products").update({ batch_size: batchSize, unit }).eq("id", sauce.id);
+      }
+
+      window.dispatchEvent(new Event("onis-data-updated"));
       setSaveStatus("done");
       setTimeout(() => setSaveStatus("idle"), 1500);
     } catch {
@@ -155,16 +178,6 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
   };
 
   // Sheet data
-  // Column index → letter (A, B, C, ..., Z, AA, AB, ...)
-  const colLetter = (idx: number): string => {
-    let s = "";
-    let n = idx;
-    while (n >= 0) {
-      s = String.fromCharCode(65 + (n % 26)) + s;
-      n = Math.floor(n / 26) - 1;
-    }
-    return s;
-  };
 
   // 컬럼: 헤더 없이 (공백), 전부 editable
   const sheetColumns: SheetColumn[] = [
@@ -175,16 +188,9 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
     ]),
   ];
 
-  // 1행 소스명 셀 병합 (각 소스가 2칸 차지)
-  const sheetMergeCells: Record<string, [number, number]> = {};
-  sauceProducts.forEach((_, i) => {
-    const cIdx = 1 + i * 2;
-    sheetMergeCells[`${colLetter(cIdx)}1`] = [2, 1];
-  });
-
-  // 데이터 행: 1행=제품명+소스이름, 2행=사용량/오차 라벨, 3행~=제품 데이터
+  // 데이터 행: 1행=소스이름/배합, 2행=사용량/오차 라벨, 3행~=제품 데이터
   const sheetRows: SheetRow[] = [
-    // 1행: 제품명 라벨 + 소스 이름
+    // 1행: 소스명 / 배합
     {
       id: "__header_sauce",
       values: {
@@ -192,7 +198,7 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
         ...Object.fromEntries(
           sauceProducts.flatMap((sauce, i) => [
             [`c${1 + i * 2}`, sauce.name],
-            [`c${2 + i * 2}`, ""],
+            [`c${2 + i * 2}`, sauce.batch_size],
           ])
         ),
       },
@@ -225,9 +231,22 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
     const colIdx = Number(colKey.replace("c", ""));
     if (isNaN(colIdx)) return;
 
-    // 1행(소스이름), 2행(라벨), 제품명 컬럼 → 무시
-    if (rowId === "__header_sauce" || rowId === "__header_sub") return;
+    // 2행(라벨), 제품명 컬럼 → 무시
+    if (rowId === "__header_sub") return;
     if (colIdx === 0) return;
+
+    // 1행: 소스명(왼쪽) / 배합(오른쪽) 편집
+    if (rowId === "__header_sauce") {
+      const sauceIdx = Math.floor((colIdx - 1) / 2);
+      const isLeftCol = (colIdx - 1) % 2 === 0;
+      const sauce = sauceProducts[sauceIdx];
+      if (!sauce) return;
+      if (!isLeftCol) {
+        // 오른쪽 = 배합수
+        updateBatchSize(sauce.id, Number(value) || 1);
+      }
+      return;
+    }
 
     // 제품 데이터 행
     const sauceIdx = Math.floor((colIdx - 1) / 2);
@@ -291,7 +310,22 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
               <TableRow>
                 <TableHead className="min-w-[120px] sticky left-0 z-10 bg-background" rowSpan={2}>제품명</TableHead>
                 {sauceProducts.map((sauce) => (
-                  <TableHead key={sauce.id} className="min-w-[180px] text-center">{sauce.name}</TableHead>
+                  <TableHead key={sauce.id} className="min-w-[220px] text-center">
+                    <div className="flex items-center gap-1">
+                      <span className="text-sm flex-1 truncate">{sauce.name}</span>
+                      <Input
+                        type="number"
+                        className="h-7 text-xs text-center w-[72px] shrink-0 text-muted-foreground"
+                        value={sauce.batch_size || ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          updateBatchSize(sauce.id, v === "" ? 0 : Number(v) || 1);
+                        }}
+                        placeholder="배합"
+                        min={1}
+                      />
+                    </div>
+                  </TableHead>
                 ))}
               </TableRow>
               <TableRow>
@@ -349,7 +383,6 @@ export function CustomSauce({ activeCategory, storeId }: Props) {
           columns={sheetColumns}
           rows={sheetRows}
           onCellChange={handleSheetCellChange}
-          mergeCells={sheetMergeCells}
           freezeRows={2}
           allowInsertRow={false}
           allowInsertColumn={false}

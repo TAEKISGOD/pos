@@ -113,6 +113,12 @@ ${MATCHING_RULES}
 - 메뉴명이 "자체소스" 카테고리의 제품명과 매칭되면 recipeType: "sauce"로 분류하세요.
 - 그 외에는 recipeType: "menu"로 분류하세요.
 
+【배합(batch) 규칙 - 자체소스 전용】
+- 소스명 뒤에 "N배합"이 명시되면 batchSize = N으로 설정하세요.
+  예: "@우동국물 100배합" → menuName: "우동국물", batchSize: 100
+- "배합" 키워드가 없으면 batchSize는 null (기본값 1 적용)
+- batchSize는 recipeType이 "sauce"일 때만 유효합니다.
+
 【재료 파싱 규칙】
 - 각 재료에서 제품명과 사용량(숫자)을 추출하세요.
 - 잔 종류(하이볼잔, 언더락잔, 허리케인글라스 등)는 재료가 아닙니다 → "glassware" 필드로 분리
@@ -126,6 +132,7 @@ ${MATCHING_RULES}
     {
       "menuName": "메뉴명 또는 소스명 (입력 그대로)",
       "recipeType": "menu" | "sauce",
+      "batchSize": "숫자 또는 null (sauce에서 N배합이 명시된 경우만)",
       "glassware": "잔 종류 (있을 때만, 없으면 null)",
       "garnish": "가니쉬/데코 설명 (있을 때만, 없으면 null)",
       "note": "기타 조리 지시사항 (있을 때만, 없으면 null)",
@@ -277,6 +284,7 @@ export async function POST(request: Request) {
       const menusRaw = (parsed.menus || []) as {
         menuName: string;
         recipeType?: "menu" | "sauce";
+        batchSize?: number | null;
         glassware?: string | null;
         garnish?: string | null;
         note?: string | null;
@@ -334,10 +342,14 @@ export async function POST(request: Request) {
           return { ...base, status: "none" as const };
         });
 
+        // 배합수 추출 (sauce 전용)
+        const batchSize = recipeType === "sauce" && menu.batchSize ? Number(menu.batchSize) : null;
+
         // 컨텍스트 구성
         const context: Record<string, unknown> = {};
         if (recipeType === "sauce") {
           context.sauceName = cleanMenuName;
+          if (batchSize) context.batchSize = batchSize;
           context.sauceStatus = menu.sauceStatus || "none";
           if (menu.sauceStatus === "auto" && menu.sauceMatchedProduct) {
             const sp = productMap.get(normalizeName(menu.sauceMatchedProduct));
@@ -357,6 +369,7 @@ export async function POST(request: Request) {
         return {
           menuName: cleanMenuName,
           recipeType,
+          batchSize,
           glassware: menu.glassware || null,
           garnish: menu.garnish || null,
           note: menu.note || null,

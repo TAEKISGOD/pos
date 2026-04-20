@@ -23,7 +23,7 @@ function checkRateLimit(userId: string): boolean {
 interface StoreData {
   categoryProducts: CategoryProducts[];
   menus: { name: string; recipes: { productName: string; amount: number; tolerancePercent: number }[] }[];
-  sauceRecipes: { sauceName: string; ingredients: { name: string; amount: number }[] }[];
+  sauceRecipes: { sauceName: string; batchSize: number; ingredients: { name: string; amount: number }[] }[];
 }
 
 async function fetchStoreData(storeId: string): Promise<StoreData> {
@@ -87,9 +87,21 @@ async function fetchStoreData(storeId: string): Promise<StoreData> {
     allSauceProductIds.add(sr.sauce_product_id);
   }
 
+  // 소스 제품의 batch_size 조회
+  const sauceProdIds = Array.from(allSauceProductIds);
+  const batchSizeMap = new Map<string, number>();
+  if (sauceProdIds.length > 0) {
+    const { data: sauceProdsData } = await supabase
+      .from("products")
+      .select("id, batch_size")
+      .in("id", sauceProdIds);
+    sauceProdsData?.forEach((p) => { batchSizeMap.set(p.id, p.batch_size ?? 1); });
+  }
+
   const sauceRecipes: StoreData["sauceRecipes"] = [];
-  for (const sauceId of Array.from(allSauceProductIds)) {
+  for (const sauceId of sauceProdIds) {
     const sauceName = productMap.get(sauceId) || "알 수 없음";
+    const batchSize = batchSizeMap.get(sauceId) || 1;
     const ingredients = (sauceRecipesRaw || [])
       .filter((sr) => sr.sauce_product_id === sauceId && sr.amount > 0)
       .map((sr) => ({
@@ -98,7 +110,7 @@ async function fetchStoreData(storeId: string): Promise<StoreData> {
       }));
 
     if (ingredients.length > 0) {
-      sauceRecipes.push({ sauceName, ingredients });
+      sauceRecipes.push({ sauceName, batchSize, ingredients });
     }
   }
 
@@ -140,7 +152,7 @@ function formatStoreData(data: StoreData): string {
   if (data.sauceRecipes.length > 0) {
     text += "\n\n【자체소스 레시피】";
     for (const sauce of data.sauceRecipes) {
-      text += `\n[${sauce.sauceName}] `;
+      text += `\n[${sauce.sauceName}] (${sauce.batchSize}배합) `;
       text += sauce.ingredients.map((i) => `${i.name} ${i.amount}`).join(", ");
     }
   }

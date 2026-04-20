@@ -137,6 +137,7 @@ export async function POST(request: Request) {
     // ═══════════════════════════════════════
     if (action.type === "update_sauce_recipes") {
       const sauceName = normalizeName(action.params.sauceName);
+      const batchSize = action.params.batchSize ? Number(action.params.batchSize) : undefined;
       const recipes = action.params.recipes as { ingredientName: string; amount: number }[];
 
       if (!sauceName) return Response.json({ error: "소스명이 없습니다." }, { status: 400 });
@@ -152,6 +153,11 @@ export async function POST(request: Request) {
           error: `소스 "${sauceName}"을 찾을 수 없습니다.`,
           errorType: "product_not_found",
         }, { status: 404 });
+      }
+
+      // batchSize가 있으면 products 테이블 업데이트
+      if (batchSize && batchSize > 0) {
+        await supabase.from("products").update({ batch_size: batchSize }).eq("id", sauce.id);
       }
 
       // 기존 소스 레시피 1회
