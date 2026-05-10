@@ -13,7 +13,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { Save, RefreshCw, FlaskConical, Table2, Loader2, CheckCircle2, ShoppingCart, X, Copy, Check } from "lucide-react";
+import { Save, RefreshCw, Table2, Loader2, CheckCircle2, ShoppingCart, X, Copy, Check } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { calculateUpdatedInventory, type InventoryCalcResult } from "@/lib/calculations";
@@ -28,13 +28,19 @@ interface Props {
 interface SauceProduct {
   id: string;
   name: string;
-  batch_size: number;
 }
 
 interface SauceRecipe {
   sauce_product_id: string;
   ingredient_product_id: string;
   amount: number;
+}
+
+interface SauceProductionRow {
+  mode: "batch" | "stock";
+  batch_count: number;
+  ingredient_id: string | null;
+  ingredient_amount: number;
 }
 
 export function UpdateInventory({ activeCategory, storeId }: Props) {
@@ -48,8 +54,7 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
 
   const [sauceProducts, setSauceProducts] = useState<SauceProduct[]>([]);
   const [sauceRecipes, setSauceRecipes] = useState<SauceRecipe[]>([]);
-  const [sauceProductions, setSauceProductions] = useState<Record<string, number>>({});
-  const [sauceDialogOpen, setSauceDialogOpen] = useState(false);
+  const [sauceProductionRows, setSauceProductionRows] = useState<Record<string, SauceProductionRow>>({});
 
   // 발주 추천 관련
   interface OrderRecommendation {
@@ -95,26 +100,48 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
     if (!sauceCat) {
       setSauceProducts([]);
       setSauceRecipes([]);
+      setSauceProductionRows({});
       return;
     }
 
     const { data: sauceProds } = await supabase
       .from("products")
-      .select("id, name, batch_size")
+      .select("id, name")
       .eq("category_id", sauceCat.id)
       .order("created_at");
 
-    if (sauceProds) setSauceProducts(sauceProds.map((p) => ({ ...p, batch_size: p.batch_size ?? 1 })));
+    if (sauceProds) setSauceProducts(sauceProds);
 
     if (sauceProds && sauceProds.length > 0) {
+      const sauceIds = sauceProds.map((p) => p.id);
+
       const { data: recipes } = await supabase
         .from("custom_sauce_recipes")
         .select("sauce_product_id, ingredient_product_id, amount")
-        .in("sauce_product_id", sauceProds.map((p) => p.id));
+        .in("sauce_product_id", sauceIds);
 
       if (recipes) setSauceRecipes(recipes);
+
+      const { data: prodRows } = await supabase
+        .from("daily_sauce_productions")
+        .select("sauce_product_id, mode, batch_count, ingredient_id, ingredient_amount")
+        .in("sauce_product_id", sauceIds)
+        .eq("date", dateStr);
+
+      const map: Record<string, SauceProductionRow> = {};
+      (prodRows ?? []).forEach((r) => {
+        map[r.sauce_product_id] = {
+          mode: r.mode as "batch" | "stock",
+          batch_count: r.batch_count ?? 0,
+          ingredient_id: r.ingredient_id ?? null,
+          ingredient_amount: r.ingredient_amount ?? 0,
+        };
+      });
+      setSauceProductionRows(map);
+    } else {
+      setSauceProductionRows({});
     }
-  }, [storeId]);
+  }, [storeId, dateStr]);
 
   useEffect(() => { calculate(); }, [calculate]);
   useEffect(() => { fetchSauceData(); }, [fetchSauceData]);
@@ -129,26 +156,40 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
     const effectMap: Record<string, number> = {};
 
     for (const sauceProduct of sauceProducts) {
-      const production = sauceProductions[sauceProduct.id] || 0; // 개수 (1 = 1배합분)
-      if (production <= 0) continue;
-
-      // 소스 제품 자체의 잔량 증가분은 production 개수만큼
-      effectMap[sauceProduct.id] = (effectMap[sauceProduct.id] || 0) + production;
+      const row = sauceProductionRows[sauceProduct.id];
+      if (!row) continue;
 
       const ingredientRecipes = sauceRecipes.filter(
         (r) => r.sauce_product_id === sauceProduct.id
       );
 
-      // 원재료 차감: recipe.amount × production (개수)
-      // 1개 = 레시피 전체 재료량 1세트 차감
+      // 배합 수 환산
+      let batchCount = 0;
+      if (row.mode === "batch") {
+        batchCount = row.batch_count;
+      } else if (row.mode === "stock" && row.ingredient_id) {
+        const recipe = ingredientRecipes.find((r) => r.ingredient_product_id === row.ingredient_id);
+        if (recipe && recipe.amount > 0) {
+          batchCount = row.ingredient_amount / recipe.amount;
+        }
+      }
+      if (batchCount <= 0) continue;
+
+      // 1배합 총량 (레시피 재료 합)
+      const oneBatchTotal = ingredientRecipes.reduce((sum, r) => sum + r.amount, 0);
+
+      // 소스 제품 잔량 증가: 실제 생산량
+      effectMap[sauceProduct.id] = (effectMap[sauceProduct.id] || 0) + (batchCount * oneBatchTotal);
+
+      // 재료 차감: recipe.amount × batchCount
       for (const recipe of ingredientRecipes) {
-        const deduction = recipe.amount * production;
+        const deduction = recipe.amount * batchCount;
         effectMap[recipe.ingredient_product_id] = (effectMap[recipe.ingredient_product_id] || 0) - deduction;
       }
     }
 
     return effectMap;
-  }, [sauceProducts, sauceRecipes, sauceProductions]);
+  }, [sauceProducts, sauceRecipes, sauceProductionRows]);
 
   const filtered = results.filter((r) => r.categoryId === activeCategory);
 
@@ -405,9 +446,6 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
         <div className="flex items-center justify-between">
           <CardTitle>업데이트 재고 - {format(selectedDate, "yyyy년 MM월 dd일")}</CardTitle>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setSauceDialogOpen(true)} disabled={sauceProducts.length === 0}>
-              <FlaskConical className="h-4 w-4 mr-1" />자체소스 생산
-            </Button>
             <Button variant="outline" size="sm" onClick={calculate} disabled={loading}>
               <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />재계산
             </Button>
@@ -483,59 +521,6 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
             </TableBody>
           </Table>
         </div>
-
-        {/* 자체소스 생산 다이얼로그 */}
-        <Dialog open={sauceDialogOpen} onOpenChange={setSauceDialogOpen}>
-          <DialogContent>
-            <DialogHeader><DialogTitle>자체소스 생산량 입력</DialogTitle></DialogHeader>
-            <div className="space-y-4">
-              {sauceProducts.map((sauce) => {
-                const ingredientRecipes = sauceRecipes.filter(
-                  (r) => r.sauce_product_id === sauce.id
-                );
-                const production = sauceProductions[sauce.id] || 0;
-
-                return (
-                  <div key={sauce.id} className="space-y-2">
-                    <div className="flex items-center gap-3">
-                      <label className="font-medium min-w-[100px]">{sauce.name}</label>
-                      <Input
-                        type="number"
-                        className="w-[120px]"
-                        placeholder="0"
-                        value={sauceProductions[sauce.id] || ""}
-                        onChange={(e) => setSauceProductions((prev) => ({
-                          ...prev,
-                          [sauce.id]: Number(e.target.value),
-                        }))}
-                      />
-                      <span className="text-sm text-muted-foreground">개 ({sauce.batch_size}배합 기준)</span>
-                    </div>
-                    {production > 0 && ingredientRecipes.length > 0 && (
-                      <div className="ml-4 text-sm text-muted-foreground space-y-1">
-                        {ingredientRecipes.map((recipe) => {
-                          const ingredientProduct = results.find(
-                            (r) => r.productId === recipe.ingredient_product_id
-                          );
-                          const deduction = recipe.amount * production;
-                          return (
-                            <div key={recipe.ingredient_product_id} className="flex gap-2">
-                              <span>{ingredientProduct?.productName ?? "알 수 없음"}</span>
-                              <span className="text-red-600">-{deduction.toFixed(1)}g</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            <div className="flex justify-end mt-4">
-              <Button onClick={() => setSauceDialogOpen(false)}>확인</Button>
-            </div>
-          </DialogContent>
-        </Dialog>
 
         <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
           <DialogContent>

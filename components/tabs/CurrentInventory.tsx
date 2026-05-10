@@ -147,7 +147,7 @@ export function CurrentInventory({ activeCategory }: Props) {
   }, [fetchRows]);
 
   const addRow = () => {
-    setRows((prev) => [...prev, { name: "", unit: "g", price: 0, remaining: 0, isNew: true }]);
+    setRows((prev) => [...prev, { name: "", unit: "", price: 0, remaining: 0, isNew: true }]);
   };
 
   const updateRow = (index: number, field: keyof Row, value: string | number) => {
@@ -223,11 +223,11 @@ export function CurrentInventory({ activeCategory }: Props) {
   // Sheet data
   const sheetColumns: SheetColumn[] = [
     { key: "name", header: "제품명", type: "text", editable: true, width: 200 },
-    { key: "unit", header: "용량(g)", type: "text", editable: true, width: 100 },
+    { key: "unit", header: "용량", type: "text", editable: true, width: 100 },
     ...(isSauceCategory
       ? [{ key: "price", header: "가격(원)", width: 120 } as SheetColumn]
       : [{ key: "price", header: "가격(원)", type: "number" as const, editable: true, width: 120 } as SheetColumn]),
-    { key: "remaining", header: "잔량(g)", type: "number", editable: true, width: 100 },
+    { key: "remaining", header: "잔량", type: "number", editable: true, width: 100 },
   ];
 
   const sheetRows: SheetRow[] = rows.map((row, idx) => ({
@@ -246,7 +246,7 @@ export function CurrentInventory({ activeCategory }: Props) {
     // 새 행 (기존 데이터 범위 밖)
     if (rowId.startsWith("__new__")) {
       setRows((prev) => {
-        const newRow: Row = { name: "", unit: "g", price: 0, remaining: 0, isNew: true };
+        const newRow: Row = { name: "", unit: "", price: 0, remaining: 0, isNew: true };
         if (colKey === "name" || colKey === "unit") {
           newRow[colKey] = String(value);
         } else if (colKey === "price" || colKey === "remaining") {
@@ -305,9 +305,9 @@ export function CurrentInventory({ activeCategory }: Props) {
             <TableHeader>
               <TableRow>
                 <TableHead>제품명</TableHead>
-                <TableHead>용량(g)</TableHead>
+                <TableHead>용량</TableHead>
                 <TableHead>가격(원)</TableHead>
-                <TableHead>잔량(g)</TableHead>
+                <TableHead>잔량</TableHead>
                 <TableHead className="w-[50px]"></TableHead>
               </TableRow>
             </TableHeader>
@@ -318,7 +318,7 @@ export function CurrentInventory({ activeCategory }: Props) {
                     <Input lang="ko" value={row.name} onChange={(e) => updateRow(idx, "name", e.target.value)} placeholder="제품명" />
                   </TableCell>
                   <TableCell>
-                    <Input value={row.unit} onChange={(e) => updateRow(idx, "unit", e.target.value)} placeholder="g" className="w-[80px]" />
+                    <Input value={row.unit} onChange={(e) => updateRow(idx, "unit", e.target.value)} placeholder="용량" className="w-[80px]" />
                   </TableCell>
                   <TableCell>
                     {isSauceCategory ? (

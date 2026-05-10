@@ -6,8 +6,48 @@ import { MessageCircle, X, Send, Loader2, ChevronDown, Check, XCircle, Copy, Ale
 import { useDateContext } from "@/lib/date-context";
 import { Resizable } from "re-resizable";
 import { FuzzyMatchReview, FuzzyResult, ResolvedItem, FuzzyContext, FuzzyMode } from "@/components/FuzzyMatchReview";
+import { ProductionReview, ProductionRow, ResolvedProduction } from "@/components/ProductionReview";
+import { format } from "date-fns";
 
-type ChatMode = "chat" | "recipe" | "inventory";
+const toLocalDateStr = (d: Date) => format(d, "yyyy-MM-dd");
+
+type ChatMode = "chat" | "recipe" | "inventory" | "production";
+
+interface DbProduct {
+  id: string;
+  name: string;
+  unit: string;
+  categoryId: string;
+  categoryName: string;
+}
+
+interface SauceRecipeInfo {
+  sauceProductId: string;
+  ingredientProductId: string;
+  ingredientName: string;
+  amount: number;
+}
+
+interface ProductionConflictExisting {
+  id: string;
+  sauce_product_id: string;
+  mode: "batch" | "stock";
+  batch_count: number;
+  ingredient_id: string | null;
+  ingredient_amount: number;
+}
+
+interface ProductionConflict {
+  sauceId: string;
+  sauceName: string;
+  existing: ProductionConflictExisting[];
+  incoming: ResolvedProduction[];
+}
+
+interface PendingProductionSave {
+  items: ResolvedProduction[];
+  conflicts: ProductionConflict[];
+}
 
 interface Action {
   description: string;
@@ -28,6 +68,11 @@ interface Message {
   fuzzyContext?: FuzzyContext | null;
   fuzzyMode?: FuzzyMode;
   fuzzyStatus?: "pending" | "confirmed" | "rejected";
+  // 자체소스 생산 모드
+  productionRows?: ProductionRow[] | null;
+  productionSauceProducts?: DbProduct[] | null;
+  productionSauceRecipes?: SauceRecipeInfo[] | null;
+  productionStatus?: "pending" | "confirmed" | "rejected";
   isError?: boolean;
   errorType?: string;
   errorDetails?: { failedItem?: string; suggestion?: string; availableOptions?: string[] };
@@ -48,6 +93,15 @@ interface MenuFuzzyData {
   products: { id: string; name: string; unit: string; categoryId: string; categoryName: string }[];
 }
 
+// 다중 생산 데이터 타입 (순차 처리)
+interface ProductionFuzzyData {
+  row: ProductionRow;
+  categories: { id: string; name: string }[];
+  products: DbProduct[];
+  sauceProducts: DbProduct[];
+  sauceRecipes: SauceRecipeInfo[];
+}
+
 interface ChatBoxProps {
   storeId: string;
   userId: string;
@@ -57,35 +111,38 @@ const MODE_LABELS: Record<ChatMode, string> = {
   chat: "일반채팅",
   recipe: "레시피입력",
   inventory: "현재재고입력",
+  production: "자체소스생산",
 };
 
 const MODE_ICONS: Record<ChatMode, string> = {
   chat: "💬",
   recipe: "📝",
   inventory: "📦",
+  production: "🧪",
 };
 
 const MODE_COLORS: Record<ChatMode, string> = {
   chat: "bg-muted/50",
   recipe: "bg-orange-50 dark:bg-orange-950/30",
   inventory: "bg-blue-50 dark:bg-blue-950/30",
+  production: "bg-purple-50 dark:bg-purple-950/30",
 };
 
 const MODE_HINTS: Record<ChatMode, string> = {
   chat: "💬 일반채팅 모드입니다.\n매장 데이터에 대해 무엇이든 물어보세요.",
   recipe: "📝 레시피입력 모드입니다.\n@메뉴명 으로 시작하면 여러 메뉴를 한 번에 등록할 수 있어요.",
   inventory: "📦 현재재고입력 모드입니다.\n\"제품명 잔량 숫자\" 형식으로 입력하세요.",
+  production: "🧪 자체소스생산 모드입니다.\n예: \"오리엔탈 2배합\", \"쯔유 마요네즈 200\", \"갈릭 취소\", \"어제랑 똑같이\"",
 };
 
 const WELCOME_CONTENT = `안녕하세요! OnIS 도우미입니다.
 
-모드: [💬 일반채팅] [📝 레시피입력] [📦 현재재고입력]
+모드: [💬 일반채팅] [📝 레시피입력] [📦 현재재고입력] [🧪 자체소스생산]
 탭 클릭 또는 # 명령어로 전환됩니다.
 
 ━━━━━━━━━━━━━━━━━━
 📝 레시피입력 (#레시피입력)
    @메뉴명 으로 시작 → 재료 나열
-   여러 메뉴도 한 번에 가능합니다.
 
    예) @잭콕
        잭다니얼 30
@@ -95,16 +152,21 @@ const WELCOME_CONTENT = `안녕하세요! OnIS 도우미입니다.
    제품 잔량·가격·단위 수정
 
    예) 올리브유 잔량 250
-       진간장 가격 8000으로 변경
+
+🧪 자체소스생산 (#자체소스생산)
+   배합/재고 기준 생산, 취소, 복사, 미리보기, 추천
+
+   예) 오리엔탈 2배합
+       쯔유 마요네즈 200
+       갈릭 취소
+       어제랑 똑같이
+       남은 마요로 최대 만들면?
 
 💬 일반채팅 (#/)
    등록된 데이터 조회·질문
 
-   예) 잭콕 레시피 알려줘
-       자체소스 종류 뭐 있지?
-
 ━━━━━━━━━━━━━━━━━━
-💡 @메뉴명 으로 구분하면 여러 메뉴 동시 등록 가능`;
+💡 자연어로 자유롭게 입력하세요`;
 
 // 구조화된 입력 감지
 function isStructuredInput(text: string, chatMode: ChatMode): boolean {
@@ -119,6 +181,11 @@ function isStructuredInput(text: string, chatMode: ChatMode): boolean {
   }
   if (chatMode === "recipe") {
     return /\d+/.test(text) && text.length > 5;
+  }
+  if (chatMode === "production") {
+    // 배합/재고/취소/복사/미리보기/추천 키워드가 하나라도 있으면 구조화 입력
+    return /배합|취소|삭제|어제|그저께|지난주|남은|최대|만들면|만들려|재고에 맞춰/.test(text)
+      || /^.+\s+.+\s+\d+/.test(text); // "소스명 재료명 숫자" 패턴 (재고 모드)
   }
   return false;
 }
@@ -193,6 +260,14 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
   const [currentMenuIdx, setCurrentMenuIdx] = useState(0);
   const [multiMenuResults, setMultiMenuResults] = useState<{ menuName: string; success: boolean; message: string }[]>([]);
 
+  // 다중 자체소스 생산 순차 처리
+  const [multiProductions, setMultiProductions] = useState<ProductionFuzzyData[]>([]);
+  const [currentProductionIdx, setCurrentProductionIdx] = useState(0);
+  const [multiProductionResults, setMultiProductionResults] = useState<{ inputLine: string; success: boolean; message: string }[]>([]);
+
+  // 자체소스 생산 충돌 다이얼로그
+  const [pendingSave, setPendingSave] = useState<PendingProductionSave | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -257,9 +332,108 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
       handleModeSwitch("inventory", trimmed);
       return;
     }
+    if (trimmed === "#자체소스생산") {
+      setInput("");
+      handleModeSwitch("production", trimmed);
+      return;
+    }
     if (trimmed === "#/") {
       setInput("");
       handleModeSwitch("chat", trimmed);
+      return;
+    }
+
+    // 자체소스 생산 모드: 구조화 입력 → fuzzy-match
+    if (mode === "production" && isStructuredInput(trimmed, mode)) {
+      const userMsg: Message = { role: "user", content: trimmed };
+      setMessages((prev) => [...prev, userMsg]);
+      setInput("");
+      setLoading(true);
+
+      try {
+        const res = await fetch("/api/chat/fuzzy-match", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: trimmed, storeId, userId, mode: "production" }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: data.error || "오류가 발생했습니다.",
+            isError: true,
+            errorType: data.errorType,
+            errorDetails: data.details,
+          }]);
+          return;
+        }
+
+        const productionRows: ProductionRow[] = data.productions || [];
+        const dbProducts: DbProduct[] = data.products || [];
+        const sauceProducts: DbProduct[] = data.sauceProducts || [];
+
+        // 소스 레시피 정보 (재료 선택용) — bulk-fetch via supabase 클라이언트는 클라이언트에서 못함
+        // 서버에서 받지 않았으므로, ProductionReview의 재료 후보는 ingredientCandidates에 의존
+        const sauceRecipes: SauceRecipeInfo[] = [];
+
+        if (productionRows.length === 0) {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: "생산 입력을 인식하지 못했습니다.",
+            isError: true,
+            errorType: "parse_failed",
+          }]);
+          return;
+        }
+
+        if (productionRows.length >= 2) {
+          // 다중: 순차 처리 모드
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `총 ${productionRows.length}건의 생산 입력이 감지되었습니다.\n하나씩 확인하며 진행하겠습니다.`,
+          }]);
+          const queue: ProductionFuzzyData[] = productionRows.map((row) => ({
+            row,
+            categories: data.categories || [],
+            products: dbProducts,
+            sauceProducts,
+            sauceRecipes,
+          }));
+          setMultiProductions(queue);
+          setCurrentProductionIdx(0);
+          setMultiProductionResults([]);
+
+          const first = queue[0];
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `진행 중: 1/${queue.length}`,
+            productionRows: [first.row],
+            productionSauceProducts: first.sauceProducts,
+            productionSauceRecipes: first.sauceRecipes,
+            productionStatus: "pending",
+          }]);
+        } else {
+          setMessages((prev) => [...prev, {
+            role: "assistant",
+            content: `${productionRows.length}건 인식했습니다. 확인해주세요.`,
+            productionRows,
+            productionSauceProducts: sauceProducts,
+            productionSauceRecipes: sauceRecipes,
+            productionStatus: "pending",
+          }]);
+        }
+      } catch {
+        setMessages((prev) => [...prev, {
+          role: "assistant",
+          content: "서버와 통신에 실패했습니다.",
+          isError: true,
+          errorType: "network_error",
+        }]);
+      } finally {
+        setLoading(false);
+      }
       return;
     }
 
@@ -393,7 +567,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, storeId, userId, mode, history, date: selectedDate.toISOString().slice(0, 10) }),
+        body: JSON.stringify({ message: trimmed, storeId, userId, mode, history, date: toLocalDateStr(selectedDate) }),
       });
 
       const data = await res.json();
@@ -439,7 +613,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
 
     try {
       if (fuzzyMode === "inventory") {
-        const dateStr = selectedDate.toISOString().slice(0, 10);
+        const dateStr = toLocalDateStr(selectedDate);
         const res = await fetch("/api/chat/bulk-inventory", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -507,7 +681,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 storeId,
-                date: selectedDate.toISOString().slice(0, 10),
+                date: toLocalDateStr(selectedDate),
                 items: [{
                   inputName: item.inputName,
                   value: 0,
@@ -654,6 +828,210 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
     }
   };
 
+  // 자체소스 생산: 사용자가 검토한 항목을 저장/실행
+  const advanceMultiProduction = (
+    appendResult: { inputLine: string; success: boolean; message: string }
+  ) => {
+    const newResults = [...multiProductionResults, appendResult];
+    setMultiProductionResults(newResults);
+
+    const nextIdx = currentProductionIdx + 1;
+    if (nextIdx < multiProductions.length) {
+      setCurrentProductionIdx(nextIdx);
+      const next = multiProductions[nextIdx];
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: `진행 중: ${nextIdx + 1}/${multiProductions.length}`,
+        productionRows: [next.row],
+        productionSauceProducts: next.sauceProducts,
+        productionSauceRecipes: next.sauceRecipes,
+        productionStatus: "pending",
+      }]);
+    } else {
+      const summary = newResults.map((r) => r.success ? `✅ ${r.inputLine}` : `⚠️ ${r.inputLine}: ${r.message}`).join("\n");
+      const successCount = newResults.filter((r) => r.success).length;
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: `${summary}\n\n총 ${newResults.length}개 중 ${successCount}개 완료`,
+      }]);
+      setMultiProductions([]);
+      setCurrentProductionIdx(0);
+      setMultiProductionResults([]);
+      window.dispatchEvent(new Event("onis-data-updated"));
+    }
+  };
+
+  const saveProduction = async (
+    items: ResolvedProduction[],
+    conflictMode: "ask" | "overwrite" | "append" = "ask"
+  ): Promise<{ success: boolean; message: string; needsConfirm?: boolean; conflicts?: ProductionConflict[] }> => {
+    const dateStr = toLocalDateStr(selectedDate);
+    const payload = items.map((it) => ({
+      sauceProductId: it.sauceProductId,
+      sauceName: it.sauceName,
+      mode: it.intent === "batch" ? "batch" : "stock",
+      batchCount: it.batchCount ?? 0,
+      ingredientId: it.ingredientId,
+      ingredientName: it.ingredientName,
+      ingredientAmount: it.ingredientAmount ?? 0,
+    }));
+
+    const res = await fetch("/api/chat/bulk-sauce-production", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ storeId, date: dateStr, items: payload, conflictMode }),
+    });
+
+    const data = await res.json();
+    if (data.needsConfirm) {
+      return { success: false, needsConfirm: true, conflicts: data.conflicts, message: "충돌 확인 필요" };
+    }
+    return { success: !!data.success, message: data.message || data.error || "" };
+  };
+
+  const handleProductionConfirm = async (msgIndex: number, items: ResolvedProduction[]) => {
+    setLoading(true);
+    setSaving(true);
+
+    try {
+      // intent별 분리
+      const saveItems = items.filter((i) => i.intent === "batch" || i.intent === "stock");
+      const otherItems = items.filter((i) => i.intent !== "batch" && i.intent !== "stock");
+
+      const messagesAcc: string[] = [];
+
+      // 1) 저장 항목 → bulk-sauce-production
+      if (saveItems.length > 0) {
+        const result = await saveProduction(saveItems, "ask");
+        if (result.needsConfirm && result.conflicts) {
+          // 충돌: 다이얼로그 표시 후 대기
+          setPendingSave({ items: saveItems, conflicts: result.conflicts });
+          // 메시지 상태는 confirmed로 두지 않음 — 다이얼로그 후 처리
+          setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, productionStatus: "pending" as const } : m));
+          setLoading(false);
+          setSaving(false);
+          return;
+        }
+        messagesAcc.push(result.success ? `✅ 저장: ${result.message}` : `⚠️ ${result.message}`);
+      }
+
+      // 2) 그 외 액션 (delete/copy/preview/recommend) → execute
+      for (const it of otherItems) {
+        const dateStr = toLocalDateStr(selectedDate);
+        let executeAction: { type: string; params: Record<string, unknown> } | null = null;
+
+        if (it.intent === "delete") {
+          executeAction = { type: "delete_sauce_production", params: { sauceName: it.sauceName, date: dateStr } };
+        } else if (it.intent === "copy") {
+          let sourceDate = dateStr;
+          if (it.sourceDateRef) {
+            const d = new Date(selectedDate);
+            const ref = it.sourceDateRef;
+            if (ref.includes("어제")) d.setDate(d.getDate() - 1);
+            else if (ref.includes("그저께")) d.setDate(d.getDate() - 2);
+            else if (ref.includes("지난주")) d.setDate(d.getDate() - 7);
+            sourceDate = toLocalDateStr(d);
+          }
+          executeAction = {
+            type: "copy_sauce_production",
+            params: { sourceDate, targetDate: dateStr, sauceName: it.sauceName, conflictMode: "overwrite" },
+          };
+        } else if (it.intent === "preview") {
+          executeAction = {
+            type: "preview_sauce_production",
+            params: {
+              sauceName: it.sauceName,
+              mode: it.ingredientId ? "stock" : "batch",
+              batchCount: it.batchCount ?? 0,
+              ingredientName: it.ingredientName ?? "",
+              ingredientAmount: it.ingredientAmount ?? 0,
+            },
+          };
+        } else if (it.intent === "recommend") {
+          executeAction = {
+            type: "recommend_sauce_production",
+            params: {
+              sauceName: it.sauceName,
+              limitingIngredientHint: it.limitingIngredientHint ?? "",
+              date: dateStr,
+            },
+          };
+        }
+
+        if (!executeAction) continue;
+
+        const res = await fetch("/api/chat/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: executeAction, storeId }),
+        });
+        const data = await res.json();
+        if (data.success) messagesAcc.push(`✅ ${data.message}`);
+        else messagesAcc.push(`⚠️ ${data.error || "실패"}`);
+      }
+
+      setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, productionStatus: "confirmed" as const } : m));
+
+      const summary = messagesAcc.join("\n\n");
+
+      if (multiProductions.length > 0) {
+        // 순차 처리: 다음으로
+        const inputLine = multiProductions[currentProductionIdx]?.row.inputLine || "";
+        const allSuccess = !messagesAcc.some((m) => m.startsWith("⚠️"));
+        advanceMultiProduction({ inputLine, success: allSuccess, message: summary });
+      } else {
+        setMessages((prev) => [...prev, { role: "assistant", content: summary || "처리 완료" }]);
+        if (saveItems.length > 0) window.dispatchEvent(new Event("onis-data-updated"));
+      }
+    } catch {
+      setMessages((prev) => [...prev, {
+        role: "assistant",
+        content: "처리 중 오류가 발생했습니다.",
+        isError: true,
+        errorType: "db_error",
+      }]);
+    } finally {
+      setLoading(false);
+      setSaving(false);
+    }
+  };
+
+  const handleProductionCancel = (msgIndex: number) => {
+    setMessages((prev) => prev.map((m, i) => i === msgIndex ? { ...m, productionStatus: "rejected" as const } : m));
+
+    if (multiProductions.length > 0) {
+      const inputLine = multiProductions[currentProductionIdx]?.row.inputLine || "";
+      advanceMultiProduction({ inputLine, success: false, message: "건너뜀" });
+    } else {
+      setMessages((prev) => [...prev, { role: "assistant", content: "취소되었습니다." }]);
+    }
+  };
+
+  // 충돌 다이얼로그 응답
+  const handleConflictResolve = async (resolveMode: "overwrite" | "append") => {
+    if (!pendingSave) return;
+    setLoading(true);
+    setSaving(true);
+    try {
+      const result = await saveProduction(pendingSave.items, resolveMode);
+      const msg = result.success ? `✅ 저장: ${result.message}` : `⚠️ ${result.message}`;
+
+      if (multiProductions.length > 0) {
+        const inputLine = multiProductions[currentProductionIdx]?.row.inputLine || "";
+        advanceMultiProduction({ inputLine, success: result.success, message: msg });
+      } else {
+        setMessages((prev) => [...prev, { role: "assistant", content: msg }]);
+        if (result.success) window.dispatchEvent(new Event("onis-data-updated"));
+      }
+    } catch {
+      setMessages((prev) => [...prev, { role: "assistant", content: "저장 실패", isError: true }]);
+    } finally {
+      setPendingSave(null);
+      setLoading(false);
+      setSaving(false);
+    }
+  };
+
   const handleConfirmAction = async (msgIndex: number) => {
     const msg = messages[msgIndex];
     if (!msg.action) return;
@@ -669,7 +1047,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
         const res = await fetch("/api/chat/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: { ...act, params: { ...act.params, date: selectedDate.toISOString().slice(0, 10) } }, storeId }),
+          body: JSON.stringify({ action: { ...act, params: { ...act.params, date: toLocalDateStr(selectedDate) } }, storeId }),
         });
 
         const data = await res.json();
@@ -739,6 +1117,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
     chat: "질문을 입력하세요...",
     recipe: "@메뉴명 재료 용량... (Ctrl+Enter)",
     inventory: "제품명 잔량 (여러 줄 → Ctrl+Enter)",
+    production: "오리엔탈 2배합 / 쯔유 마요 200 / 어제랑 똑같이",
   };
 
   const maxLength = 3000;
@@ -753,6 +1132,39 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
         <div className="bg-background rounded-xl px-8 py-6 shadow-2xl flex flex-col items-center gap-3">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
           <span className="text-sm font-medium">저장중...</span>
+        </div>
+      </div>
+    )}
+
+    {/* 자체소스 생산 충돌 다이얼로그 */}
+    {pendingSave && (
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/50">
+        <div className="bg-background rounded-xl shadow-2xl max-w-lg w-[90%] p-5 space-y-3">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-amber-500" />
+            <span className="font-medium">이미 저장된 생산 기록이 있습니다</span>
+          </div>
+          <div className="text-sm text-muted-foreground">
+            오늘 같은 자체소스에 대한 기록이 존재합니다. 어떻게 처리할까요?
+          </div>
+          <div className="border rounded-md max-h-[260px] overflow-y-auto text-xs">
+            {pendingSave.conflicts.map((c) => (
+              <div key={c.sauceId} className="border-b last:border-b-0 px-3 py-2">
+                <div className="font-medium mb-1">{c.sauceName}</div>
+                <div className="text-muted-foreground">
+                  기존: {c.existing.map((e) => e.mode === "batch" ? `${e.batch_count}배합` : `재고 ${e.ingredient_amount}`).join(", ")}
+                </div>
+                <div className="text-muted-foreground">
+                  추가: {c.incoming.map((it) => it.intent === "batch" ? `${it.batchCount}배합` : `${it.ingredientName} ${it.ingredientAmount}`).join(", ")}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2 justify-end">
+            <Button size="sm" variant="outline" onClick={() => setPendingSave(null)}>취소</Button>
+            <Button size="sm" variant="outline" onClick={() => handleConflictResolve("overwrite")}>기존 지우고 저장</Button>
+            <Button size="sm" onClick={() => handleConflictResolve("append")}>누적으로 추가</Button>
+          </div>
         </div>
       </div>
     )}
@@ -800,7 +1212,7 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
         </div>
         {/* 모드 탭 */}
         <div className="flex px-2 pb-1.5 gap-1">
-          {(["chat", "recipe", "inventory"] as ChatMode[]).map((m) => (
+          {(["chat", "recipe", "inventory", "production"] as ChatMode[]).map((m) => (
             <button
               key={m}
               onClick={() => handleModeSwitch(m)}
@@ -905,6 +1317,28 @@ export function ChatBox({ storeId, userId }: ChatBoxProps) {
               <div className="text-xs text-muted-foreground mt-1 ml-1">적용 완료</div>
             )}
             {msg.fuzzyResults && msg.fuzzyStatus === "rejected" && (
+              <div className="text-xs text-muted-foreground mt-1 ml-1">취소됨</div>
+            )}
+
+            {/* 자체소스 생산 리뷰 패널 */}
+            {msg.productionRows && msg.productionStatus === "pending" && (
+              <div className="mt-2 ml-1 max-w-[95%]">
+                <ProductionReview
+                  rows={msg.productionRows}
+                  categories={[]}
+                  products={msg.productionSauceProducts || []}
+                  sauceProducts={msg.productionSauceProducts || []}
+                  sauceRecipes={msg.productionSauceRecipes || []}
+                  onConfirm={(items) => handleProductionConfirm(i, items)}
+                  onCancel={() => handleProductionCancel(i)}
+                  disabled={loading}
+                />
+              </div>
+            )}
+            {msg.productionRows && msg.productionStatus === "confirmed" && (
+              <div className="text-xs text-muted-foreground mt-1 ml-1">적용 완료</div>
+            )}
+            {msg.productionRows && msg.productionStatus === "rejected" && (
               <div className="text-xs text-muted-foreground mt-1 ml-1">취소됨</div>
             )}
 

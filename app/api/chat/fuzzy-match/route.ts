@@ -89,6 +89,67 @@ ${MATCHING_RULES}
 }`;
 }
 
+function buildProductionPrompt(sauceList: string, ingredientList: string): string {
+  return `당신은 자체소스 생산 입력 매칭 어시스턴트입니다.
+
+사용자의 자체소스 생산 관련 입력을 분석하여 의도와 데이터를 추출합니다.
+
+【등록된 자체소스 목록】
+${sauceList || "(등록된 자체소스 없음)"}
+
+【재료 후보 (각 자체소스 레시피 재료)】
+${ingredientList || "(재료 정보 없음)"}
+
+${MATCHING_RULES}
+
+【의도 분류 (intent)】
+입력 라인별로 아래 6가지 의도 중 하나로 분류:
+1. "batch" - 배합 단위 생산: "오리엔탈 2배합", "갈릭 1.5배합", "타다끼 만들었어 3배합"
+2. "stock" - 한정재료 기준 생산: "쯔유 마요네즈 200", "갈릭소스 다진마늘 100g"
+3. "delete" - 취소/삭제: "오리엔탈 취소", "갈릭 삭제", "오리엔탈 안 만들었어"
+4. "copy" - 다른 날짜 복사: "어제랑 똑같이", "어제 갈릭이랑 똑같이", "지난주 화요일이랑"
+5. "preview" - 미리보기 (저장X): "오리엔탈 3배합 만들면 재료 얼마?", "타다끼 200g 만들려면 뭐 필요해?"
+6. "recommend" - 재고 기반 추천: "남은 마요로 최대 만들면?", "오리엔탈 재고에 맞춰서"
+
+【파싱 규칙】
+- 단위(g, ml, kg, EA 등)는 무시하고 숫자만 추출하세요. 예: "200g" → value: 200
+- 배합 수는 소수점 가능: "1.5배합" → batchCount: 1.5
+- "@" 기호가 붙은 경우 제거하세요.
+- 한 메시지에 여러 라인은 각각 분리하여 productions 배열에 넣으세요.
+- "어제" / "오늘" / "지난주 화요일" 같은 상대 날짜는 sourceDateRef 필드에 그대로 넣으세요.
+
+【출력 형식】 반드시 아래 JSON만 출력하세요:
+{
+  "productions": [
+    {
+      "intent": "batch" | "stock" | "delete" | "copy" | "preview" | "recommend",
+      "inputLine": "사용자가 입력한 원본 라인",
+      "sauceName": "소스명 (입력 그대로)",
+      "sauceStatus": "auto" | "candidate" | "none",
+      "sauceMatchedProduct": "매칭된 자체소스 제품명 (auto일 때만)",
+      "sauceCandidates": ["후보1", "후보2"],
+      "batchCount": 숫자 (intent=batch 또는 preview일 때),
+      "ingredientName": "재료명 (intent=stock 또는 preview일 때)",
+      "ingredientStatus": "auto" | "candidate" | "none",
+      "ingredientMatchedProduct": "매칭된 재료 제품명 (auto일 때만)",
+      "ingredientCandidates": ["후보1", "후보2"],
+      "ingredientAmount": 숫자 (intent=stock 또는 preview일 때),
+      "sourceDateRef": "어제 | 그저께 | 지난주 화요일 등 (intent=copy일 때만)",
+      "limitingIngredientHint": "재료명 (intent=recommend, 사용자가 특정 재료를 언급한 경우)"
+    }
+  ]
+}
+
+【실패 처리】
+처리할 수 없는 경우:
+{
+  "error": true,
+  "errorReason": "parse_failed",
+  "description": "구체적 실패 이유"
+}
+절대 추측이나 임의 매칭으로 진행하지 마세요.`;
+}
+
 function buildRecipePrompt(productList: string, menuList: string): string {
   return `당신은 메뉴 레시피 및 자체소스 레시피 매칭 어시스턴트입니다.
 
@@ -234,6 +295,34 @@ export async function POST(request: Request) {
         .order("created_at");
       const menuList = (menus || []).map((m) => m.name).join(", ");
       systemPrompt = buildRecipePrompt(productList, menuList);
+    } else if (mode === "production") {
+      // 자체소스 카테고리 + 각 소스의 레시피 재료 목록
+      const sauceCat = (categories || []).find((c) => c.name === "자체소스");
+      const sauceProducts = sauceCat
+        ? dbProducts.filter((p) => p.categoryId === sauceCat.id)
+        : [];
+      const sauceList = sauceProducts.map((p) => p.name).join(", ");
+
+      let ingredientList = "";
+      if (sauceProducts.length > 0) {
+        const sauceIds = sauceProducts.map((p) => p.id);
+        const { data: recipes } = await supabase
+          .from("custom_sauce_recipes")
+          .select("sauce_product_id, ingredient_product_id, amount")
+          .in("sauce_product_id", sauceIds);
+        const productNameMap = new Map(dbProducts.map((p) => [p.id, p.name]));
+        const ingByCat = new Map<string, string[]>();
+        for (const sp of sauceProducts) {
+          const rs = (recipes || []).filter((r) => r.sauce_product_id === sp.id);
+          const names = rs.map((r) => productNameMap.get(r.ingredient_product_id) ?? "?");
+          if (names.length > 0) ingByCat.set(sp.name, names);
+        }
+        ingByCat.forEach((names, sName) => {
+          ingredientList += `[${sName}] ${names.join(", ")}\n`;
+        });
+      }
+
+      systemPrompt = buildProductionPrompt(sauceList, ingredientList);
     } else {
       systemPrompt = buildInventoryPrompt(productList);
     }
@@ -383,6 +472,100 @@ export async function POST(request: Request) {
         categories: categoryList,
         products: dbProducts,
         mode: "recipe",
+      });
+    }
+
+    // ─── 자체소스 생산 모드 ───
+    if (mode === "production") {
+      const productionsRaw = (parsed.productions || []) as {
+        intent: "batch" | "stock" | "delete" | "copy" | "preview" | "recommend";
+        inputLine?: string;
+        sauceName?: string;
+        sauceStatus?: "auto" | "candidate" | "none";
+        sauceMatchedProduct?: string;
+        sauceCandidates?: string[];
+        batchCount?: number;
+        ingredientName?: string;
+        ingredientStatus?: "auto" | "candidate" | "none";
+        ingredientMatchedProduct?: string;
+        ingredientCandidates?: string[];
+        ingredientAmount?: number;
+        sourceDateRef?: string;
+        limitingIngredientHint?: string;
+      }[];
+
+      if (productionsRaw.length === 0) {
+        return Response.json({
+          success: false,
+          error: "입력에서 자체소스 생산 항목을 찾지 못했습니다.",
+          errorType: "parse_failed",
+          details: { suggestion: "예: \"오리엔탈 2배합\" 또는 \"쯔유 마요네즈 200\"" },
+        }, { status: 400 });
+      }
+
+      // 자체소스 카테고리 식별
+      const sauceCat = (categories || []).find((c) => c.name === "자체소스");
+      const sauceProductsList = sauceCat
+        ? dbProducts.filter((p) => p.categoryId === sauceCat.id)
+        : [];
+      const sauceMap = new Map(sauceProductsList.map((p) => [p.name, p]));
+
+      const productions = productionsRaw.map((row) => {
+        const cleanSauceName = normalizeName(row.sauceName);
+
+        // 소스 매칭
+        let sauceField: Record<string, unknown> = { sauceStatus: row.sauceStatus || "none" };
+        if (row.sauceStatus === "auto" && row.sauceMatchedProduct) {
+          const sp = sauceMap.get(normalizeName(row.sauceMatchedProduct));
+          if (sp) sauceField = { sauceStatus: "auto", sauceMatched: sp };
+          else sauceField = { sauceStatus: "none" };
+        } else if (row.sauceStatus === "candidate" && row.sauceCandidates) {
+          const sc = row.sauceCandidates
+            .map((n) => sauceMap.get(normalizeName(n)))
+            .filter((p): p is DbProduct => !!p);
+          if (sc.length > 0) sauceField = { sauceStatus: "candidate", sauceCandidates: sc };
+          else sauceField = { sauceStatus: "none" };
+        }
+
+        // 재료 매칭 (stock 또는 preview일 때만)
+        let ingredientField: Record<string, unknown> = {};
+        if (row.intent === "stock" || row.intent === "preview") {
+          if (row.ingredientName) {
+            const cleanIng = normalizeName(row.ingredientName);
+            ingredientField = { ingredientName: cleanIng, ingredientStatus: row.ingredientStatus || "none" };
+            if (row.ingredientStatus === "auto" && row.ingredientMatchedProduct) {
+              const ip = productMap.get(normalizeName(row.ingredientMatchedProduct));
+              if (ip) ingredientField = { ingredientName: cleanIng, ingredientStatus: "auto", ingredientMatched: ip };
+              else ingredientField = { ingredientName: cleanIng, ingredientStatus: "none" };
+            } else if (row.ingredientStatus === "candidate" && row.ingredientCandidates) {
+              const ic = row.ingredientCandidates
+                .map((n) => productMap.get(normalizeName(n)))
+                .filter((p): p is DbProduct => !!p);
+              if (ic.length > 0) ingredientField = { ingredientName: cleanIng, ingredientStatus: "candidate", ingredientCandidates: ic };
+              else ingredientField = { ingredientName: cleanIng, ingredientStatus: "none" };
+            }
+          }
+        }
+
+        return {
+          intent: row.intent,
+          inputLine: row.inputLine || "",
+          sauceName: cleanSauceName,
+          ...sauceField,
+          batchCount: row.batchCount ?? null,
+          ingredientAmount: row.ingredientAmount ?? null,
+          ...ingredientField,
+          sourceDateRef: row.sourceDateRef || null,
+          limitingIngredientHint: row.limitingIngredientHint || null,
+        };
+      });
+
+      return Response.json({
+        productions,
+        categories: categoryList,
+        products: dbProducts,
+        sauceProducts: sauceProductsList,
+        mode: "production",
       });
     }
 

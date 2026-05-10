@@ -20,6 +20,7 @@ import { CurrentInventory } from "@/components/tabs/CurrentInventory";
 import { CustomSauce } from "@/components/tabs/CustomSauce";
 import { MenuRecipe } from "@/components/tabs/MenuRecipe";
 import { TodaySales } from "@/components/tabs/TodaySales";
+import { SauceProduction } from "@/components/tabs/SauceProduction";
 import { WasteInput } from "@/components/tabs/WasteInput";
 import { UpdateInventory } from "@/components/tabs/UpdateInventory";
 
@@ -250,12 +251,13 @@ export function DashboardTabs() {
 
       {/* 메인 탭 */}
       <Tabs defaultValue="inventory" className="w-full">
-        <TabsList className="grid w-full grid-cols-6">
+        <TabsList className="grid w-full grid-cols-7">
           {[
             { value: "inventory", label: "현재재고", tip: "서브탭별 재고 정보를 입력해주세요" },
             { value: "custom-sauce", label: "자체소스", tip: "자체소스 레시피를 입력해주세요" },
             { value: "menu-recipe", label: "메뉴별 레시피", tip: "매장에 등록된 메뉴의 레시피를 입력해주세요" },
             { value: "sales", label: "오늘 판매량", tip: "마감 후 매출 내역 엑셀 파일을 업로드해주세요" },
+            { value: "sauce-production", label: "자체소스 생산", tip: "당일 자체소스 생산량을 입력해주세요" },
             { value: "waste", label: "폐기 수량", tip: "당일 폐기 수량을 입력해주세요" },
             { value: "update", label: "업데이트 재고", tip: "업데이트된 재고를 확인해주세요" },
           ].map((tab) => (
@@ -283,6 +285,9 @@ export function DashboardTabs() {
         </TabsContent>
         <TabsContent value="sales">
           <TodaySales activeCategory={activeCategory} storeId={storeId} />
+        </TabsContent>
+        <TabsContent value="sauce-production">
+          <SauceProduction storeId={storeId} />
         </TabsContent>
         <TabsContent value="waste">
           <WasteInput activeCategory={activeCategory} storeId={storeId} />

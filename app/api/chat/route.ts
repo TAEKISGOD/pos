@@ -24,9 +24,18 @@ interface StoreData {
   categoryProducts: CategoryProducts[];
   menus: { name: string; recipes: { productName: string; amount: number; tolerancePercent: number }[] }[];
   sauceRecipes: { sauceName: string; batchSize: number; ingredients: { name: string; amount: number }[] }[];
+  todayProductions: {
+    sauceName: string;
+    mode: "batch" | "stock";
+    batchCount: number;
+    ingredientName?: string;
+    ingredientAmount?: number;
+    productionAmount: number;
+  }[];
+  inventory: { name: string; remaining: number }[];
 }
 
-async function fetchStoreData(storeId: string): Promise<StoreData> {
+async function fetchStoreData(storeId: string, dateStr?: string): Promise<StoreData> {
   const supabase = createServerSupabaseClient();
 
   const { data: categories } = await supabase
@@ -114,7 +123,58 @@ async function fetchStoreData(storeId: string): Promise<StoreData> {
     }
   }
 
-  return { categoryProducts, menus: menuData, sauceRecipes };
+  // 오늘 자체소스 생산 + 잔량 조회 (date가 있을 때만)
+  const todayProductions: StoreData["todayProductions"] = [];
+  const inventory: StoreData["inventory"] = [];
+  if (dateStr) {
+    const sauceProdIdsAll = sauceProdIds;
+    if (sauceProdIdsAll.length > 0) {
+      const { data: prodRows } = await supabase
+        .from("daily_sauce_productions")
+        .select("sauce_product_id, mode, batch_count, ingredient_id, ingredient_amount")
+        .in("sauce_product_id", sauceProdIdsAll)
+        .eq("date", dateStr);
+
+      for (const row of prodRows || []) {
+        const sauceName = productMap.get(row.sauce_product_id) || "?";
+        const recipe = sauceRecipes.find((sr) => sr.sauceName === sauceName);
+        const oneBatchTotal = recipe?.ingredients.reduce((s, i) => s + i.amount, 0) ?? 0;
+
+        let actualBatchCount = 0;
+        if (row.mode === "batch") {
+          actualBatchCount = row.batch_count ?? 0;
+        } else if (row.mode === "stock" && row.ingredient_id) {
+          const ing = recipe?.ingredients.find((i) => productMap.get(row.ingredient_id) === i.name);
+          if (ing && ing.amount > 0) actualBatchCount = (row.ingredient_amount ?? 0) / ing.amount;
+        }
+
+        todayProductions.push({
+          sauceName,
+          mode: row.mode as "batch" | "stock",
+          batchCount: row.batch_count ?? 0,
+          ingredientName: row.ingredient_id ? productMap.get(row.ingredient_id) : undefined,
+          ingredientAmount: row.ingredient_amount ?? undefined,
+          productionAmount: actualBatchCount * oneBatchTotal,
+        });
+      }
+    }
+
+    // 잔량 조회 (모든 제품)
+    const allProductIds = Array.from(productMap.keys());
+    if (allProductIds.length > 0) {
+      const { data: snaps } = await supabase
+        .from("inventory_snapshots")
+        .select("product_id, remaining")
+        .in("product_id", allProductIds)
+        .eq("date", dateStr);
+      for (const s of snaps || []) {
+        const name = productMap.get(s.product_id);
+        if (name) inventory.push({ name, remaining: s.remaining || 0 });
+      }
+    }
+  }
+
+  return { categoryProducts, menus: menuData, sauceRecipes, todayProductions, inventory };
 }
 
 function formatStoreData(data: StoreData): string {
@@ -157,6 +217,21 @@ function formatStoreData(data: StoreData): string {
     }
   }
 
+  if (data.todayProductions && data.todayProductions.length > 0) {
+    text += "\n\n【오늘 자체소스 생산】";
+    for (const p of data.todayProductions) {
+      const detail = p.mode === "batch"
+        ? `${p.batchCount}배합`
+        : `${p.ingredientName} ${p.ingredientAmount} 기준`;
+      text += `\n[${p.sauceName}] ${detail} → 생산량 ${p.productionAmount.toFixed(1)}`;
+    }
+  }
+
+  if (data.inventory && data.inventory.length > 0) {
+    text += "\n\n【오늘 잔량】";
+    text += "\n" + data.inventory.map((i) => `${i.name} ${i.remaining}`).join(", ");
+  }
+
   return text;
 }
 
@@ -168,9 +243,24 @@ const CHAT_SYSTEM_PROMPT = (storeDataText: string) => `당신은 한국 음식�
 ${storeDataText}
 
 역할:
-- 매장의 제품, 카테고리, 메뉴 레시피, 자체소스 레시피에 대한 질문에 위 데이터를 기반으로 답변합니다
+- 매장의 제품, 카테고리, 메뉴 레시피, 자체소스 레시피, 오늘 자체소스 생산 내역, 잔량에 대한 질문에 위 데이터를 기반으로 답변합니다
 - 일반적인 인사나 질문에는 친절하게 답변합니다
-- 데이터를 수정하고 싶으면 레시피입력 또는 현재재고입력 모드를 사용하라고 안내합니다
+- 데이터를 수정하고 싶으면 레시피입력/현재재고입력/자체소스생산 모드를 사용하라고 안내합니다
+
+【추천 액션 (자체소스 생산 추천)】
+사용자가 "남은 재료로 최대 만들면?", "오리엔탈 재고 맞춰서" 등 추천을 요청하면 아래 JSON으로 응답:
+{
+  "description": "추천 내용 설명",
+  "actions": [
+    {
+      "type": "recommend_sauce_production",
+      "params": {
+        "sauceName": "소스명",
+        "limitingIngredientHint": "재료명 (사용자가 특정한 경우만)"
+      }
+    }
+  ]
+}
 
 답변은 간결하고 친절하게 해주세요.`;
 
@@ -214,6 +304,58 @@ ${storeDataText}
 여러 항목은 actions 배열에 여러 개를 넣으세요.
 오차범위가 있으면 params에 "tolerancePercent": 숫자 를 추가하세요.
 처리 불가능한 경우 일반 텍스트로 설명하세요.`;
+
+const PRODUCTION_SYSTEM_PROMPT = (storeDataText: string, dateStr: string) => `당신은 한국 음식점의 자체소스 생산 입력을 돕는 어시스턴트입니다.
+
+현재 매장 데이터:
+${storeDataText}
+
+현재 선택된 날짜: ${dateStr}
+
+이 모드에서 할 수 있는 작업:
+1. 자체소스 취소/삭제 (delete_sauce_production)
+2. 자체소스 생산 단건 입력 (update_sauce_production)
+3. 다른 날짜에서 복사 (copy_sauce_production)
+4. 차감 미리보기 (preview_sauce_production)
+5. 재고 기반 추천 (recommend_sauce_production)
+
+【액션 형식】
+{
+  "description": "변경 내용 설명",
+  "actions": [
+    {
+      "type": "delete_sauce_production",
+      "params": { "sauceName": "오리엔탈", "date": "${dateStr}" }
+    },
+    {
+      "type": "update_sauce_production",
+      "params": {
+        "sauceName": "오리엔탈",
+        "date": "${dateStr}",
+        "mode": "batch" | "stock",
+        "batchCount": 2,
+        "ingredientName": "마요네즈",
+        "ingredientAmount": 200
+      }
+    },
+    {
+      "type": "copy_sauce_production",
+      "params": { "sourceDate": "YYYY-MM-DD", "targetDate": "${dateStr}", "sauceName": "선택적", "conflictMode": "ask" }
+    },
+    {
+      "type": "preview_sauce_production",
+      "params": { "sauceName": "오리엔탈", "mode": "batch", "batchCount": 3 }
+    },
+    {
+      "type": "recommend_sauce_production",
+      "params": { "sauceName": "오리엔탈", "limitingIngredientHint": "마요네즈" }
+    }
+  ]
+}
+
+날짜 변환: "어제" → ${(() => { const d = new Date(dateStr); d.setDate(d.getDate() - 1); return d.toISOString().slice(0, 10); })()} 같은 식으로 절대날짜로 변환해서 sourceDate에 넣으세요.
+구조화된 입력(예: "오리엔탈 2배합", "쯔유 마요 200")은 클라이언트 fuzzy-match를 거치므로 여기서는 처리하지 않습니다.
+일반 자연어 질의/명령만 처리하세요. 처리 불가능하면 일반 텍스트로 안내하세요.`;
 
 const INVENTORY_SYSTEM_PROMPT = (storeDataText: string, dateStr: string) => `당신은 한국 음식점의 현재재고를 수정하는 어시스턴트입니다.
 
@@ -278,7 +420,8 @@ export async function POST(request: Request) {
       );
     }
 
-    const storeData = await fetchStoreData(storeId);
+    const dateStrForData = date || new Date().toISOString().slice(0, 10);
+    const storeData = await fetchStoreData(storeId, dateStrForData);
     const storeDataText = formatStoreData(storeData);
     const openai = getOpenAIClient();
 
@@ -296,6 +439,34 @@ export async function POST(request: Request) {
           ...chatHistory,
         ],
         max_tokens: 2000,
+        temperature: 0.2,
+      });
+
+      const reply = response.choices[0]?.message?.content || "";
+
+      try {
+        const jsonMatch = reply.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const actionData = JSON.parse(jsonMatch[0]);
+          return Response.json({ reply: actionData.description || reply, action: actionData });
+        }
+      } catch {
+        // pass
+      }
+
+      return Response.json({ reply });
+    }
+
+    // ─── 자체소스 생산 모드 (자연어 명령) ───
+    if (mode === "production") {
+      const dateStr = date || new Date().toISOString().slice(0, 10);
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: PRODUCTION_SYSTEM_PROMPT(storeDataText, dateStr) },
+          ...chatHistory,
+        ],
+        max_tokens: 1500,
         temperature: 0.2,
       });
 
