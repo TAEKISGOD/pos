@@ -193,6 +193,14 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
 
   const filtered = results.filter((r) => r.categoryId === activeCategory);
 
+  // 현재재고가 선택일이 아닌 이전 날짜에서 이월돼 온 경우 그 출처 날짜
+  const carriedFrom = useMemo(() => {
+    const carried = results
+      .map((r) => r.currentQuantityDate)
+      .filter((d): d is string => !!d && d !== dateStr);
+    return carried.length > 0 ? carried.sort()[carried.length - 1] : null;
+  }, [results, dateStr]);
+
   const handleSave = async () => {
     setSaveStatus("saving");
     setConfirmOpen(false);
@@ -201,7 +209,9 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
       nextDateObj.setDate(nextDateObj.getDate() + 1);
       const nextDateStr = format(nextDateObj, "yyyy-MM-dd");
 
-      const upserts = filtered.map((r) => {
+      // 현재 보고 있는 서브탭이 아니라 전 카테고리 제품을 함께 이월한다.
+      // (filtered 만 저장하면 다른 카테고리 제품이 다음 날 0부터 시작한다)
+      const upserts = results.map((r) => {
         const sauceEffect = sauceEffectMap[r.productId] || 0;
         const total = manualOverrides[r.productId] ?? (r.newQuantity + sauceEffect);
         return {
@@ -211,7 +221,7 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
         };
       });
 
-      const productIds = filtered.map((r) => r.productId);
+      const productIds = results.map((r) => r.productId);
       if (productIds.length > 0) {
         await supabase.from("inventory_snapshots").delete().in("product_id", productIds).eq("date", nextDateStr);
       }
@@ -444,7 +454,14 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
-          <CardTitle>업데이트 재고 - {format(selectedDate, "yyyy년 MM월 dd일")}</CardTitle>
+          <div className="flex items-center gap-2">
+            <CardTitle>업데이트 재고 - {format(selectedDate, "yyyy년 MM월 dd일")}</CardTitle>
+            {carriedFrom && (
+              <Badge variant="outline" className="text-amber-700 border-amber-300 bg-amber-50">
+                현재재고 {format(new Date(`${carriedFrom}T00:00:00`), "M월 d일")} 이월
+              </Badge>
+            )}
+          </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={calculate} disabled={loading}>
               <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />재계산
@@ -526,7 +543,11 @@ export function UpdateInventory({ activeCategory, storeId }: Props) {
           <DialogContent>
             <DialogHeader><DialogTitle>재고 업데이트 확인</DialogTitle></DialogHeader>
             <p className="text-sm text-muted-foreground">
-              {format(selectedDate, "yyyy년 MM월 dd일")} 기준으로 계산된 재고를 다음 날 재고로 저장하시겠습니까?
+              {format(selectedDate, "yyyy년 MM월 dd일")} 기준으로 계산된 재고를{" "}
+              {format(new Date(selectedDate.getTime() + 86400000), "MM월 dd일")} 재고로 저장합니다.
+            </p>
+            <p className="text-sm">
+              현재 서브탭뿐 아니라 <span className="font-medium">전체 {results.length}개 제품</span>이 함께 이월됩니다.
             </p>
             <div className="flex gap-2 justify-end mt-4">
               <Button variant="outline" onClick={() => setConfirmOpen(false)}>취소</Button>

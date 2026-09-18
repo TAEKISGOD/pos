@@ -6,6 +6,7 @@ import { useDateContext } from "@/lib/date-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -14,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { format } from "date-fns";
 import { useSpreadsheetNav, parsePasteData } from "@/hooks/use-spreadsheet";
 import { SpreadsheetModal, type SheetColumn, type SheetRow } from "@/components/SpreadsheetModal";
+import { fetchInventoryAsOf, carriedOverFrom } from "@/lib/inventory";
 
 interface Row {
   id?: string;
@@ -36,6 +38,7 @@ export function CurrentInventory({ activeCategory }: Props) {
   const [calculatedPrices, setCalculatedPrices] = useState<Record<string, number>>({});
   const [sheetOpen, setSheetOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "done">("idle");
+  const [carriedFrom, setCarriedFrom] = useState<string | null>(null);
   const supabase = createClient();
   const { toast } = useToast();
   const dateStr = format(selectedDate, "yyyy-MM-dd");
@@ -62,19 +65,14 @@ export function CurrentInventory({ activeCategory }: Props) {
     if (!products) return;
 
     const productIds = products.map((p) => p.id);
-    const snapMap: Record<string, number> = {};
 
-    if (productIds.length > 0) {
-      const { data: snapshots } = await supabase
-        .from("inventory_snapshots")
-        .select("*")
-        .in("product_id", productIds)
-        .eq("date", dateStr);
-
-      snapshots?.forEach((s) => {
-        snapMap[s.product_id] = s.remaining ?? 0;
-      });
-    }
+    // 선택일에 스냅샷이 없으면 직전 최근 스냅샷을 이월해서 보여준다
+    const { remaining: snapMap, sourceDate } = await fetchInventoryAsOf(
+      supabase,
+      productIds,
+      dateStr
+    );
+    setCarriedFrom(carriedOverFrom(sourceDate, dateStr));
 
     setRows(products.map((p) => ({
       id: p.id,
@@ -288,7 +286,14 @@ export function CurrentInventory({ activeCategory }: Props) {
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
-          <CardTitle>현재재고 - {format(selectedDate, "yyyy년 MM월 dd일")}</CardTitle>
+          <div className="flex items-center gap-2">
+            <CardTitle>현재재고 - {format(selectedDate, "yyyy년 MM월 dd일")}</CardTitle>
+            {carriedFrom && (
+              <Badge variant="outline" className="text-amber-700 border-amber-300 bg-amber-50">
+                {format(new Date(`${carriedFrom}T00:00:00`), "M월 d일")} 재고 이월
+              </Badge>
+            )}
+          </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => setSheetOpen(true)}>
               <Table2 className="h-4 w-4 mr-1" />시트 입력

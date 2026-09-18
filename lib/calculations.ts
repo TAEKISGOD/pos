@@ -1,4 +1,5 @@
 import { SupabaseClient } from "@supabase/supabase-js";
+import { fetchInventoryAsOf } from "./inventory";
 
 export interface InventoryCalcResult {
   productId: string;
@@ -14,6 +15,8 @@ export interface InventoryCalcResult {
   newQuantityMin?: number;
   newQuantityMax?: number;
   hasTolerance: boolean;
+  /** currentQuantity 가 실제로 저장돼 있던 날짜. dateStr 과 다르면 이월된 값이다. */
+  currentQuantityDate?: string;
 }
 
 export async function calculateUpdatedInventory(
@@ -38,12 +41,11 @@ export async function calculateUpdatedInventory(
   if (!products || products.length === 0) return [];
 
   // 2. 현재재고 스냅샷 (잔량 = 총 재고량 g)
+  //    선택일에 스냅샷이 없으면 직전 최근 스냅샷을 이월해서 사용한다.
+  //    (CurrentInventory 화면과 동일한 기준을 쓰기 위함)
   const productIds = products.map((p) => p.id);
-  const { data: snapshots } = await supabase
-    .from("inventory_snapshots")
-    .select("*")
-    .in("product_id", productIds)
-    .eq("date", dateStr);
+  const { remaining: inventoryMap, sourceDate: inventoryDateMap } =
+    await fetchInventoryAsOf(supabase, productIds, dateStr);
 
   const productUnitMap: Record<string, number> = {};
   products.forEach((p) => { productUnitMap[p.id] = parseFloat(p.unit) || 0; });
@@ -60,11 +62,6 @@ export async function calculateUpdatedInventory(
       }
     });
   }
-
-  const inventoryMap: Record<string, number> = {};
-  snapshots?.forEach((s) => {
-    inventoryMap[s.product_id] = s.remaining || 0;
-  });
 
   // 3. 메뉴 + 레시피
   const { data: menus } = await supabase
@@ -173,6 +170,7 @@ export async function calculateUpdatedInventory(
       wasteAmount: waste,
       newQuantity,
       hasTolerance: usage.hasTolerance,
+      currentQuantityDate: inventoryDateMap[product.id],
     };
 
     if (usage.hasTolerance) {
